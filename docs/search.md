@@ -1,6 +1,6 @@
 # Search
 
-`memctx_search` searches the active memory pack.
+`memctx_search` searches the active memory pack. Automatic context injection also performs prompt-specific retrieval before each agent turn.
 
 ## Modes
 
@@ -8,7 +8,7 @@
 - `semantic`: meaning-based search when qmd is installed.
 - `deep`: hybrid/reranked search when qmd is installed.
 
-Without qmd, pi-memctx falls back to local grep-style Markdown search.
+qmd is resolved from `MEMCTX_QMD_BIN`, `PATH`, or the optional bundled `@tobilu/qmd` dependency. Without qmd, pi-memctx falls back to local grep-style Markdown search.
 
 ## Examples
 
@@ -20,8 +20,11 @@ memctx_search(query="incident runbook for queue lag", mode="deep", limit=3)
 
 ## qmd
 
-Install qmd if you want semantic/deep search:
+pi-memctx attempts to use qmd automatically:
 
-```bash
-npm install -g @tobilu/qmd
-```
+1. `MEMCTX_QMD_BIN`
+2. `qmd` on `PATH`
+3. `node_modules/.bin/qmd` from the optional bundled dependency
+4. grep fallback
+
+Use `/pack-status` to see which path is active.

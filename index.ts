@@ -18,7 +18,7 @@
  *   - Obsidian-compatible pack structure preserved
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -69,7 +69,35 @@ let vaultRoot = "";
 let activePack = "";
 let activePackPath = "";
 let qmdAvailable = false;
+let qmdBin = "";
 let qmdCollection = "";
+let strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
+
+type SearchMode = "keyword" | "semantic" | "deep";
+type QmdSource = "env" | "path" | "local-dependency" | "missing";
+
+export type QmdStatus = {
+	available: boolean;
+	bin?: string;
+	version?: string;
+	source: QmdSource;
+	error?: string;
+};
+
+type RetrievalStatus = {
+	prompt: string;
+	mode: "qmd" | "grep-fallback" | "none";
+	query: string;
+	resultCount: number;
+	timestamp: string;
+};
+
+let qmdStatus: QmdStatus = { available: false, source: "missing" };
+let lastRetrieval: RetrievalStatus | null = null;
+
+function parseBooleanEnv(value: string | undefined): boolean {
+	return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
+}
 
 // ---------------------------------------------------------------------------
 // Public helpers (exported for testing)
@@ -164,27 +192,112 @@ export function detectActivePack(packsDir: string, cwd?: string): string | null 
 	return packs[0];
 }
 
-export async function detectQmd(): Promise<boolean> {
+function executableName(name: string): string {
+	return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+function firstExistingExecutable(candidates: string[]): string | null {
+	for (const candidate of candidates) {
+		if (candidate && fs.existsSync(candidate)) return candidate;
+	}
+	return null;
+}
+
+function qmdProbeTimeoutMs(): number {
+	const parsed = Number.parseInt(process.env.MEMCTX_QMD_PROBE_TIMEOUT_MS ?? "1200", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1200;
+}
+
+function readLocalQmdPackageVersion(binPath: string): string | undefined {
+	let dir = path.dirname(binPath);
+	for (let i = 0; i < 6; i++) {
+		const pkgPath = path.join(dir, "package.json");
+		if (fs.existsSync(pkgPath)) {
+			try {
+				const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+				if (pkg.name === "@tobilu/qmd" && pkg.version) return `qmd ${pkg.version}`;
+			} catch {
+				return undefined;
+			}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return undefined;
+}
+
+export function resolveQmdBinary(): { bin: string; source: Exclude<QmdSource, "missing"> } | null {
+	if (process.env.MEMCTX_QMD_BIN) {
+		return { bin: process.env.MEMCTX_QMD_BIN, source: "env" };
+	}
+
+	const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const pathMatch = firstExistingExecutable(pathEntries.map((entry) => path.join(entry, executableName("qmd"))));
+	if (pathMatch) return { bin: pathMatch, source: "path" };
+
+	const localCandidates: string[] = [];
+	let dir = __dirname;
+	for (let i = 0; i < 8; i++) {
+		localCandidates.push(path.join(dir, "node_modules", ".bin", executableName("qmd")));
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	const localMatch = firstExistingExecutable(localCandidates);
+	if (localMatch) return { bin: localMatch, source: "local-dependency" };
+
+	return null;
+}
+
+export async function detectQmdStatus(): Promise<QmdStatus> {
+	const resolved = resolveQmdBinary();
+	if (!resolved) return { available: false, source: "missing" };
+
 	return new Promise((resolve) => {
-		execFile("qmd", ["--version"], { timeout: 5000 }, (err) => {
-			resolve(!err);
+		const fallbackVersion = readLocalQmdPackageVersion(resolved.bin);
+		execFile(resolved.bin, ["--version"], { timeout: qmdProbeTimeoutMs() }, (err, stdout, stderr) => {
+			if (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				resolve({
+					available: false,
+					bin: resolved.bin,
+					source: resolved.source,
+					version: fallbackVersion,
+					error: message.includes("timed out") ? "probe timed out" : message,
+				});
+				return;
+			}
+			resolve({
+				available: true,
+				bin: resolved.bin,
+				source: resolved.source,
+				version: (stdout || stderr).trim().split(/\s+/).slice(0, 3).join(" ") || fallbackVersion,
+			});
 		});
 	});
+}
+
+export async function detectQmd(): Promise<boolean> {
+	qmdStatus = await detectQmdStatus();
+	qmdAvailable = qmdStatus.available;
+	qmdBin = qmdStatus.bin ?? "";
+	return qmdAvailable;
 }
 
 export async function qmdSearch(
 	query: string,
 	collection: string,
 	limit = 5,
-	mode: "keyword" | "semantic" | "deep" = "keyword",
+	mode: SearchMode = "keyword",
 ): Promise<string> {
-	if (!qmdAvailable) return "";
+	if (!qmdAvailable || !qmdBin) return "";
 	return new Promise((resolve) => {
 		const args = ["search", query, "-n", String(limit), "-c", collection];
 		if (mode === "semantic") args.push("--semantic");
 		else if (mode === "deep") args.push("--deep");
 
-		execFile("qmd", args, { timeout: mode === "deep" ? 15000 : 5000 }, (err, stdout) => {
+		execFile(qmdBin, args, { timeout: mode === "deep" ? 15000 : 5000 }, (err, stdout) => {
 			if (err) {
 				resolve("");
 				return;
@@ -195,12 +308,60 @@ export async function qmdSearch(
 }
 
 export async function qmdEmbed(collection: string, packPath: string): Promise<boolean> {
-	if (!qmdAvailable) return false;
+	if (!qmdAvailable || !qmdBin) return false;
 	return new Promise((resolve) => {
-		execFile("qmd", ["embed", "-c", collection, packPath], { timeout: 30000 }, (err) => {
+		execFile(qmdBin, ["embed", "-c", collection, packPath], { timeout: 30000 }, (err) => {
 			resolve(!err);
 		});
 	});
+}
+
+export function grepSearchPack(packPath: string, query: string, limit = 5): { text: string; matchCount: number } {
+	const files = scanPackFiles(packPath);
+	const matches: string[] = [];
+	const queryLower = query.toLowerCase();
+	const terms = queryLower.split(/\s+/).filter(Boolean);
+
+	if (terms.length === 0) return { text: "", matchCount: 0 };
+
+	for (const f of files) {
+		if (matches.length >= limit) break;
+		const content = readFileSafe(f);
+		if (!content) continue;
+		const contentLower = content.toLowerCase();
+		const score = terms.filter((t) => contentLower.includes(t)).length;
+		if (score > 0) {
+			const rel = path.relative(packPath, f);
+			const lines = content.split("\n");
+			const matchingLines = lines
+				.filter((line) => terms.some((t) => line.toLowerCase().includes(t)))
+				.slice(0, 5);
+			matches.push(`### ${rel} (${score}/${terms.length} terms matched)\n${matchingLines.join("\n")}`);
+		}
+	}
+
+	return { text: matches.join("\n\n"), matchCount: matches.length };
+}
+
+export async function searchPackMemory(
+	packPath: string,
+	query: string,
+	limit = 5,
+	mode: SearchMode = "keyword",
+): Promise<{ text: string; mode: "qmd" | "grep-fallback" | "none"; matchCount: number }> {
+	if (qmdAvailable) {
+		const qmdResults = await qmdSearch(query, qmdCollection, limit, mode);
+		if (qmdResults.trim()) {
+			return { text: qmdResults, mode: "qmd", matchCount: qmdResults.split("\n").filter((line) => line.trim()).length };
+		}
+	}
+
+	const grepResults = grepSearchPack(packPath, query, limit);
+	if (grepResults.matchCount > 0) {
+		return { text: grepResults.text, mode: "grep-fallback", matchCount: grepResults.matchCount };
+	}
+
+	return { text: "", mode: "none", matchCount: 0 };
 }
 
 /**
@@ -597,10 +758,465 @@ export function resolvePacksDir(cwd: string): string | null {
 	return null;
 }
 
+
+type EvidenceFile = {
+	path: string;
+	content: string;
+};
+
+type RepoEvidence = {
+	name: string;
+	slug: string;
+	path: string;
+	type: string;
+	status: "active" | "placeholder";
+	description: string;
+	remote: string;
+	currentBranch: string;
+	readFirst: string[];
+	packageManager: string;
+	scripts: Record<string, string>;
+	safeCommands: string[];
+	docs: EvidenceFile[];
+	workflows: EvidenceFile[];
+	infra: string[];
+	tree: string[];
+	observations: string[];
+};
+
+const REPO_HIDDEN_ALLOWLIST = new Set([".github", ".gitlab"]);
+const SKIP_DIRS = new Set([
+	".git",
+	"node_modules",
+	"vendor",
+	"dist",
+	"build",
+	"out",
+	"coverage",
+	".cache",
+	".next",
+	".turbo",
+]);
+const SENSITIVE_FILE_RE = /(^|\/)(\.env(\..*)?|.*\.(pem|key|p12|pfx)|id_rsa|id_ed25519|credentials?|secrets?\..*)$/i;
+const SECRET_VALUE_PATTERNS = [
+	/AKIA[0-9A-Z]{16}/g,
+	/-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g,
+	/(authorization\s*:\s*bearer\s+)[^\s`'"<>]+/gi,
+	/((?:api[_-]?key|secret|token|password|passwd|pwd)\s*[:=]\s*)[^\s`'"<>]+/gi,
+];
+
+function safeExecGit(repoPath: string, args: string[]): string {
+	try {
+		return execFileSync("git", ["-C", repoPath, ...args], {
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 2000,
+		}).trim();
+	} catch {
+		return "";
+	}
+}
+
+function sanitizeEvidence(text: string): string {
+	let sanitized = text;
+	for (const pattern of SECRET_VALUE_PATTERNS) {
+		sanitized = sanitized.replace(pattern, (_match, prefix = "") => `${prefix}[REDACTED_SECRET]`);
+	}
+	return sanitized;
+}
+
+function readEvidenceFile(filePath: string, repoPath: string, maxChars = 4000): EvidenceFile | null {
+	const rel = path.relative(repoPath, filePath);
+	if (SENSITIVE_FILE_RE.test(rel)) return null;
+	const content = readFileSafe(filePath);
+	if (!content?.trim()) return null;
+	return { path: rel, content: truncate(sanitizeEvidence(content.trim()), maxChars) };
+}
+
+function listTopLevelEntries(dirPath: string, limit = 60): string[] {
+	try {
+		return fs.readdirSync(dirPath, { withFileTypes: true })
+			.filter((e) => !SKIP_DIRS.has(e.name) && !SENSITIVE_FILE_RE.test(e.name))
+			.map((e) => e.isDirectory() ? `${e.name}/` : e.name)
+			.sort()
+			.slice(0, limit);
+	} catch {
+		return [];
+	}
+}
+
+function findFilesLimited(root: string, predicate: (rel: string, name: string) => boolean, limit = 20, maxDepth = 4): string[] {
+	const found: string[] = [];
+	function walk(dir: string, depth: number) {
+		if (found.length >= limit || depth > maxDepth) return;
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (found.length >= limit) break;
+			if (SKIP_DIRS.has(entry.name)) continue;
+			const full = path.join(dir, entry.name);
+			const rel = path.relative(root, full);
+			if (SENSITIVE_FILE_RE.test(rel)) continue;
+			if (entry.isDirectory()) {
+				walk(full, depth + 1);
+			} else if (predicate(rel, entry.name)) {
+				found.push(full);
+			}
+		}
+	}
+	walk(root, 0);
+	return found.sort();
+}
+
+function repoSlugForName(name: string): string {
+	if (name === ".github") return "github-profile";
+	return slugify(name) || "repo";
+}
+
+function detectPackageManager(repoPath: string): string {
+	if (fs.existsSync(path.join(repoPath, "pnpm-lock.yaml"))) return "pnpm";
+	if (fs.existsSync(path.join(repoPath, "bun.lock")) || fs.existsSync(path.join(repoPath, "bun.lockb"))) return "bun";
+	if (fs.existsSync(path.join(repoPath, "yarn.lock"))) return "yarn";
+	if (fs.existsSync(path.join(repoPath, "package-lock.json"))) return "npm";
+	return "npm";
+}
+
+function scriptCommand(pm: string, script: string): string {
+	if (script === "install") {
+		if (pm === "pnpm") return "pnpm install --frozen-lockfile";
+		if (pm === "bun") return "bun install --frozen-lockfile";
+		if (pm === "yarn") return "yarn install --frozen-lockfile";
+		return "npm ci";
+	}
+	if (pm === "pnpm") return `pnpm ${script}`;
+	if (pm === "bun") return `bun run ${script}`;
+	if (pm === "yarn") return `yarn ${script}`;
+	return `npm run ${script}`;
+}
+
+function isSafeScriptName(name: string): boolean {
+	return !/(deploy|destroy|delete|remove|apply|publish|release|prod|production|push|login|secret|token)/i.test(name);
+}
+
+function collectPackageEvidence(repoPath: string): { type: string; description: string; scripts: Record<string, string>; packageManager: string; commands: string[]; observations: string[] } {
+	const packagePath = path.join(repoPath, "package.json");
+	if (!fs.existsSync(packagePath)) return { type: "", description: "", scripts: {}, packageManager: "", commands: [], observations: [] };
+	try {
+		const pkg = JSON.parse(readFileSafe(packagePath) ?? "{}");
+		const packageManager = detectPackageManager(repoPath);
+		const scripts: Record<string, string> = pkg.scripts ?? {};
+		const commands = [scriptCommand(packageManager, "install")];
+		for (const name of Object.keys(scripts)) {
+			if (isSafeScriptName(name) && /^(dev|start|build|test|lint|typecheck|check|ci|format|e2e)$/i.test(name)) {
+				commands.push(scriptCommand(packageManager, name));
+			}
+		}
+		const deps = Object.keys(pkg.dependencies ?? {}).slice(0, 12);
+		const devDeps = Object.keys(pkg.devDependencies ?? {}).slice(0, 12);
+		const observations = [
+			`Package name: ${pkg.name ?? path.basename(repoPath)}`,
+			pkg.version ? `Package version: ${pkg.version}` : "",
+			deps.length ? `Runtime dependencies include: ${deps.join(", ")}` : "",
+			devDeps.length ? `Development dependencies include: ${devDeps.join(", ")}` : "",
+		].filter(Boolean);
+		return {
+			type: "Node/TS",
+			description: pkg.description ?? pkg.name ?? "",
+			scripts,
+			packageManager,
+			commands,
+			observations,
+		};
+	} catch {
+		return { type: "Node/TS", description: "", scripts: {}, packageManager: detectPackageManager(repoPath), commands: [], observations: ["package.json exists but could not be parsed."] };
+	}
+}
+
+function collectGoEvidence(repoPath: string): { type: string; description: string; commands: string[]; observations: string[] } {
+	const gomodPath = path.join(repoPath, "go.mod");
+	if (!fs.existsSync(gomodPath)) return { type: "", description: "", commands: [], observations: [] };
+	const gomod = readFileSafe(gomodPath) ?? "";
+	const moduleLine = gomod.match(/^module\s+(.+)$/m)?.[1] ?? "";
+	const goVersion = gomod.match(/^go\s+(.+)$/m)?.[1] ?? "";
+	return {
+		type: "Go",
+		description: moduleLine,
+		commands: ["go test ./...", "go build ./..."],
+		observations: [moduleLine ? `Go module: ${moduleLine}` : "Go module observed.", goVersion ? `Go version: ${goVersion}` : ""].filter(Boolean),
+	};
+}
+
+function collectMakeCommands(repoPath: string): string[] {
+	const makefile = readFileSafe(path.join(repoPath, "Makefile")) ?? readFileSafe(path.join(repoPath, "makefile"));
+	if (!makefile) return [];
+	const commands: string[] = [];
+	for (const match of makefile.matchAll(/^([a-zA-Z0-9_.-]+):(?:\s|$)/gm)) {
+		const target = match[1];
+		if (isSafeScriptName(target) && /^(test|build|lint|check|format|dev|run)$/i.test(target)) {
+			commands.push(`make ${target}`);
+		}
+	}
+	return commands;
+}
+
+function extractFirstMeaningfulLine(content: string): string {
+	return content.split("\n")
+		.map((line) => line.trim())
+		.find((line) => line && !line.startsWith("#") && !line.startsWith("<") && !line.startsWith("[") && !line.startsWith("!"))
+		?.slice(0, 200) ?? "";
+}
+
+function collectRepoEvidence(repoPath: string, name: string): RepoEvidence {
+	const slug = repoSlugForName(name);
+	const topLevel = listTopLevelEntries(repoPath);
+	const nonGitEntries = topLevel.filter((entry) => entry !== ".git/");
+	const isPlaceholder = nonGitEntries.length === 0;
+	const pkg = collectPackageEvidence(repoPath);
+	const go = collectGoEvidence(repoPath);
+	const hasTerraform = fs.existsSync(path.join(repoPath, "terraform")) || findFilesLimited(repoPath, (rel) => rel.endsWith(".tf"), 3, 3).length > 0;
+	const hasInfra = fs.existsSync(path.join(repoPath, "infra")) || fs.existsSync(path.join(repoPath, "charts")) || fs.existsSync(path.join(repoPath, "helm"));
+	let type = pkg.type || go.type || (hasTerraform || hasInfra ? "IaC" : "unknown");
+	if (name === ".github") type = "GitHub profile/docs";
+
+	const docs: EvidenceFile[] = [];
+	const docNames = ["AGENTS.md", "CLAUDE.md", "README.md", "CONTRIBUTING.md", "SECURITY.md", "CHANGELOG.md", "SUPPORT.md"];
+	for (const docName of docNames) {
+		const doc = readEvidenceFile(path.join(repoPath, docName), repoPath, docName === "README.md" ? 5000 : 3000);
+		if (doc) docs.push(doc);
+	}
+	for (const docPath of findFilesLimited(path.join(repoPath, "docs"), (rel, file) => file.endsWith(".md"), 12, 3)) {
+		const doc = readEvidenceFile(docPath, repoPath, 2500);
+		if (doc && !docs.some((d) => d.path === doc.path)) docs.push(doc);
+	}
+	if (name === ".github") {
+		const profile = readEvidenceFile(path.join(repoPath, "profile", "README.md"), repoPath, 5000);
+		if (profile) docs.push(profile);
+	}
+
+	const workflows = findFilesLimited(path.join(repoPath, ".github", "workflows"), (rel, file) => /\.(ya?ml)$/.test(file), 10, 1)
+		.map((f) => readEvidenceFile(f, repoPath, 2000))
+		.filter((f): f is EvidenceFile => Boolean(f));
+	const infra = [
+		...findFilesLimited(repoPath, (rel) => /(^|\/)(Dockerfile|docker-compose\.ya?ml|compose\.ya?ml)$/.test(rel), 10, 3),
+		...findFilesLimited(repoPath, (rel) => /(^|\/)(terraform|infra|helm|charts|k8s|kubernetes)\//.test(rel) && /\.(tf|ya?ml|yaml|json|md)$/.test(rel), 15, 4),
+	].map((f) => path.relative(repoPath, f));
+
+	const readFirst = docs
+		.map((d) => d.path)
+		.filter((name) => ["AGENTS.md", "CLAUDE.md", "README.md", "profile/README.md", "CONTRIBUTING.md", "SECURITY.md"].includes(name))
+		.slice(0, 8);
+	const readme = docs.find((d) => d.path === "README.md" || d.path === "profile/README.md");
+	const description = pkg.description || go.description || (readme ? extractFirstMeaningfulLine(readme.content) : "") || name;
+	const safeCommands = Array.from(new Set([
+		...pkg.commands,
+		...go.commands,
+		...collectMakeCommands(repoPath),
+	]));
+	const observations = Array.from(new Set([
+		...pkg.observations,
+		...go.observations,
+		workflows.length ? `GitHub Actions workflows observed: ${workflows.map((w) => w.path).join(", ")}` : "",
+		infra.length ? `Infrastructure/config files observed: ${infra.slice(0, 8).join(", ")}` : "",
+		isPlaceholder ? "Repository appears to be empty/placeholder; only Git metadata or no source files observed." : "",
+	].filter(Boolean)));
+
+	return {
+		name,
+		slug,
+		path: repoPath,
+		type,
+		status: isPlaceholder ? "placeholder" : "active",
+		description,
+		remote: safeExecGit(repoPath, ["remote", "get-url", "origin"]) || "unknown/not configured",
+		currentBranch: safeExecGit(repoPath, ["branch", "--show-current"]) || "unknown",
+		readFirst,
+		packageManager: pkg.packageManager,
+		scripts: pkg.scripts,
+		safeCommands,
+		docs,
+		workflows,
+		infra,
+		tree: topLevel,
+		observations,
+	};
+}
+
+function discoverRepositories(scanDir: string): RepoEvidence[] {
+	if (!fs.existsSync(scanDir)) return [];
+	return fs.readdirSync(scanDir, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory())
+		.filter((entry) => !entry.name.startsWith(".") || REPO_HIDDEN_ALLOWLIST.has(entry.name))
+		.filter((entry) => !SKIP_DIRS.has(entry.name))
+		.map((entry) => collectRepoEvidence(path.join(scanDir, entry.name), entry.name))
+		.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function yamlList(items: string[]): string {
+	return items.length ? items.map((i) => `  - ${i}`).join("\n") : "  - none";
+}
+
+function writeGeneratedFile(packPath: string, relPath: string, content: string, filesCreated: string[]): void {
+	const filePath = path.join(packPath, relPath);
+	fs.mkdirSync(path.dirname(filePath), { recursive: true });
+	fs.writeFileSync(filePath, content.trimEnd() + "\n", "utf-8");
+	filesCreated.push(filePath);
+}
+
+function repoContextNote(packSlug: string, repo: RepoEvidence, today: string): string {
+	const docs = repo.docs.slice(0, 8).map((d) => `### ${d.path}\n\n${d.content}`).join("\n\n");
+	const scripts = Object.keys(repo.scripts).length
+		? Object.entries(repo.scripts).map(([name, cmd]) => `| ${name} | \`${sanitizeEvidence(cmd)}\` |`).join("\n")
+		: "| none observed |  |";
+	const workflows = repo.workflows.length
+		? repo.workflows.map((w) => `### ${w.path}\n\n${w.content}`).join("\n\n")
+		: "No GitHub Actions workflows observed.";
+	return `---
+type: context-pack
+id: context.${packSlug}.${repo.slug}
+title: ${repo.name}
+status: active
+source_of_truth: false
+freshness: current
+last_reviewed: ${today}
+tags:
+  - pack/${packSlug}
+  - agent-memory/context-pack
+  - repo/${repo.slug}
+---
+
+# ${repo.name}
+
+**Type:** ${repo.type}  
+**Status:** ${repo.status}  
+**Description:** ${repo.description}  
+**Local path:** \`${repo.path}\`  
+**Remote:** \`${repo.remote}\`  
+**Current branch:** \`${repo.currentBranch}\`
+
+## Read first
+
+${repo.readFirst.length ? repo.readFirst.map((f) => `- \`${f}\``).join("\n") : "- Inspect repository source before assuming conventions."}
+
+## Safe commands observed
+
+${repo.safeCommands.length ? repo.safeCommands.map((c) => `- \`${c}\``).join("\n") : "No safe development commands inferred."}
+
+## Package scripts
+
+| Script | Command |
+|---|---|
+${scripts}
+
+## Observations
+
+${repo.observations.length ? repo.observations.map((o) => `- ${o}`).join("\n") : "- No high-confidence observations generated."}
+
+## Workflows
+
+${workflows}
+
+## Directory structure
+
+\`\`\`txt
+${repo.tree.join("\n") || "<empty>"}
+\`\`\`
+
+## Source excerpts
+
+${docs || "No documentation excerpts observed."}
+
+## Related
+
+- [[packs/${packSlug}/00-system/pi-agent/resource-map|Resource Map]]
+- [[packs/${packSlug}/00-system/indexes/context-index|Context Index]]
+`;
+}
+
+function repoProjectNote(packSlug: string, repo: RepoEvidence, today: string): string {
+	return `---
+type: project
+id: project.${packSlug}.${repo.slug}
+title: ${repo.name}
+status: ${repo.status === "placeholder" ? "draft" : "active"}
+source_of_truth: false
+freshness: current
+last_reviewed: ${today}
+tags:
+  - pack/${packSlug}
+  - agent-memory/project
+  - repo/${repo.slug}
+---
+
+# ${repo.name}
+
+## Repository
+
+| Field | Value |
+|---|---|
+| Local path | \`${repo.path}\` |
+| Remote | \`${repo.remote}\` |
+| Type | ${repo.type} |
+| Status | ${repo.status} |
+| Current branch | \`${repo.currentBranch}\` |
+
+## Purpose
+
+${repo.description}
+
+## Read-first files
+
+${repo.readFirst.length ? repo.readFirst.map((f) => `- \`${f}\``).join("\n") : "- No read-first files observed."}
+
+## Related
+
+- [[packs/${packSlug}/20-context/${repo.slug}|${repo.name} context]]
+- [[packs/${packSlug}/00-system/indexes/project-index|Project Index]]
+`;
+}
+
+function repoRunbookNote(packSlug: string, repo: RepoEvidence, today: string): string {
+	return `---
+type: runbook
+id: runbook.${packSlug}.${repo.slug}.development
+-title: ${repo.name} Development Runbook
+status: active
+source_of_truth: false
+freshness: current
+last_reviewed: ${today}
+tags:
+  - pack/${packSlug}
+  - agent-memory/runbook
+  - repo/${repo.slug}
+---
+
+# ${repo.name} Development Runbook
+
+Use source-of-truth files in \`${repo.path}\` before changing behavior. The commands below were inferred from manifests and safe script names only.
+
+## Setup and checks
+
+${repo.safeCommands.map((c) => `- \`${c}\``).join("\n")}
+
+## Notes
+
+- Destructive, deploy, release, publish, production, and credential-related commands are intentionally excluded from generated runbooks.
+- If a command fails, inspect the repository README, AGENTS.md, package manifest, Makefile, and CI workflows.
+
+## Related
+
+- [[packs/${packSlug}/20-context/${repo.slug}|${repo.name} context]]
+- [[packs/${packSlug}/00-system/indexes/runbook-index|Runbook Index]]
+`;
+}
+
 /**
  * Scan a directory tree and generate a pack from its contents.
- * Reads README.md, CLAUDE.md, AGENTS.md, go.mod, package.json,
- * Makefile, Dockerfile, and directory structure to build context.
+ * Performs deterministic discovery of repositories, docs, stacks, scripts,
+ * workflows, git remotes, safe development commands, and source-truth pointers.
  */
 export function generatePackFromDirectory(
 	scanDir: string,
@@ -609,64 +1225,31 @@ export function generatePackFromDirectory(
 ): { packPath: string; filesCreated: string[] } {
 	const packPath = path.join(packsDir, packSlug);
 	const filesCreated: string[] = [];
-	const today = new Date().toISOString().slice(0, 10);
+	const today = todayStr();
 	const title = packSlug.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
-	// Create directory structure
 	for (const dir of [
 		"00-system/pi-agent",
 		"00-system/indexes",
+		"00-system/local",
+		"10-user",
 		"20-context",
+		"30-projects",
+		"40-actions",
 		"50-decisions",
+		"60-observations",
 		"70-runbooks",
+		"80-sessions",
 	]) {
 		fs.mkdirSync(path.join(packPath, dir), { recursive: true });
 	}
 
-	// Scan for repos (directories with go.mod, package.json, or README.md)
-	const repos: { name: string; type: string; description: string; path: string }[] = [];
-	const topDirs = fs.existsSync(scanDir)
-		? fs.readdirSync(scanDir, { withFileTypes: true }).filter((e) => e.isDirectory() && !e.name.startsWith("."))
-		: [];
+	const repos = discoverRepositories(scanDir);
+	const contextEntries: string[] = [];
+	const projectEntries: string[] = [];
+	const runbookEntries: string[] = [];
 
-	for (const entry of topDirs) {
-		const dirPath = path.join(scanDir, entry.name);
-		let type = "unknown";
-		let description = "";
-
-		if (fs.existsSync(path.join(dirPath, "go.mod"))) {
-			type = "Go";
-			const gomod = readFileSafe(path.join(dirPath, "go.mod"));
-			const moduleLine = gomod?.match(/^module\s+(.+)$/m);
-			if (moduleLine) description = moduleLine[1];
-		} else if (fs.existsSync(path.join(dirPath, "package.json"))) {
-			type = "Node/TS";
-			try {
-				const pkg = JSON.parse(readFileSafe(path.join(dirPath, "package.json")) ?? "{}");
-				description = pkg.description ?? pkg.name ?? "";
-			} catch { /* ignore */ }
-		} else if (fs.existsSync(path.join(dirPath, "infra")) || fs.existsSync(path.join(dirPath, "terraform"))) {
-			type = "IaC";
-		}
-
-		// Read README for description
-		for (const readmeFile of ["README.md", "CLAUDE.md", "AGENTS.md"]) {
-			const readme = readFileSafe(path.join(dirPath, readmeFile));
-			if (readme) {
-				// Extract first meaningful line after heading
-				const lines = readme.split("\n").filter((l) => l.trim() && !l.startsWith("#") && !l.startsWith("<") && !l.startsWith("["));
-				if (lines.length > 0 && !description) {
-					description = lines[0].trim().slice(0, 200);
-				}
-				break;
-			}
-		}
-
-		repos.push({ name: entry.name, type, description: description || entry.name, path: dirPath });
-	}
-
-	// --- Generate manifest ---
-	const manifestContent = `---
+	writeGeneratedFile(packPath, "00-system/pi-agent/memory-manifest.md", `---
 type: system
 id: system.${packSlug}.memory-manifest
 title: ${title} Memory Manifest
@@ -681,30 +1264,61 @@ tags:
 
 # ${title} Memory Manifest
 
-This pack stores context for **${title}**.
+This pack stores safe durable context generated from \`${scanDir}\`.
 
 ## Pack root
 
 \`packs/${packSlug}\`
 
+## Entry order
+
+1. [[packs/${packSlug}/00-system/pi-agent/retrieval-protocol|Retrieval Protocol]]
+2. [[packs/${packSlug}/00-system/pi-agent/resource-map|Resource Map]]
+3. Relevant indexes under \`00-system/indexes/\`
+4. Context and project notes generated from repository source files
+5. Source-of-truth repository files when behavior matters
+
 ## Indexes
 
 - [[packs/${packSlug}/00-system/indexes/context-index|Context Index]]
+- [[packs/${packSlug}/00-system/indexes/project-index|Project Index]]
+- [[packs/${packSlug}/00-system/indexes/action-index|Action Index]]
+- [[packs/${packSlug}/00-system/indexes/decision-index|Decision Index]]
+- [[packs/${packSlug}/00-system/indexes/observation-index|Observation Index]]
+- [[packs/${packSlug}/00-system/indexes/runbook-index|Runbook Index]]
+- [[packs/${packSlug}/00-system/indexes/session-index|Session Index]]
 
 ## Safety
 
-Never store secrets, tokens, passwords, private keys, credentials, or sensitive data.
-`;
-	const manifestPath = path.join(packPath, "00-system/pi-agent/memory-manifest.md");
-	fs.writeFileSync(manifestPath, manifestContent);
-	filesCreated.push(manifestPath);
+Generated content is sanitized with high-confidence secret redaction. Never store secrets, credentials, private keys, tokens, customer data, or sensitive payloads.
+`, filesCreated);
 
-	// --- Generate resource-map ---
-	const repoTable = repos
-		.map((r) => `| \`${r.name}\` | ${r.type} | ${r.description.slice(0, 100)} |`)
-		.join("\n");
+	writeGeneratedFile(packPath, "00-system/pi-agent/retrieval-protocol.md", `---
+type: system
+id: system.${packSlug}.retrieval-protocol
+title: Retrieval Protocol
+status: active
+source_of_truth: true
+freshness: current
+last_reviewed: ${today}
+tags:
+  - agent-memory/retrieval
+  - pack/${packSlug}
+---
 
-	const resourceMapContent = `---
+# Retrieval Protocol
+
+Before working with repositories from \`${scanDir}\`:
+
+1. Read [[packs/${packSlug}/00-system/pi-agent/resource-map|Resource Map]].
+2. Read the repository-specific context note in \`20-context/\`.
+3. Read repository-local source-of-truth instructions such as \`AGENTS.md\`, \`CLAUDE.md\`, \`README.md\`, \`CONTRIBUTING.md\`, and relevant docs.
+4. Use generated runbooks only as safe starting points; source files, tests, CI, and live runtime facts win.
+5. Do not persist or expose secrets, credentials, customer data, or sensitive payloads.
+`, filesCreated);
+
+	const repoRows = repos.map((r) => `| \`${r.name}\` | ${r.type} | ${r.status} | \`${r.path}\` | \`${r.remote}\` | ${r.readFirst.map((f) => `\`${f}\``).join(", ") || "inspect source"} |`).join("\n");
+	writeGeneratedFile(packPath, "00-system/pi-agent/resource-map.md", `---
 type: system
 id: system.${packSlug}.resource-map
 title: Resource Map
@@ -719,52 +1333,27 @@ tags:
 
 # Resource Map
 
-## Repositories
-
-| Name | Type | Description |
-|---|---|---|
-${repoTable}
-
 ## Source directory
 
 \`${scanDir}\`
-`;
-	const resourceMapPath = path.join(packPath, "00-system/pi-agent/resource-map.md");
-	fs.writeFileSync(resourceMapPath, resourceMapContent);
-	filesCreated.push(resourceMapPath);
 
-	// --- Generate context pack per repo ---
-	const contextEntries: string[] = [];
+## Repositories
 
-	for (const repo of repos) {
-		const parts: string[] = [];
+| Name | Type | Status | Local path | Remote | Read first |
+|---|---|---|---|---|---|
+${repoRows || "| none observed | unknown | placeholder | - | - | - |"}
 
-		// Read README
-		const readme = readFileSafe(path.join(repo.path, "README.md"));
-		if (readme) {
-			parts.push(truncate(readme, 3000));
-		}
+## Safety
 
-		// Read CLAUDE.md or AGENTS.md for build/deploy commands
-		for (const agentFile of ["CLAUDE.md", "AGENTS.md"]) {
-			const content = readFileSafe(path.join(repo.path, agentFile));
-			if (content) {
-				parts.push(`## From ${agentFile}\n\n${truncate(content, 2000)}`);
-				break;
-			}
-		}
+- Treat generated notes as context, not authority.
+- Source-of-truth files in repositories override memory notes.
+- Secret-like values are redacted as \`[REDACTED_SECRET]\` before persistence.
+`, filesCreated);
 
-		// Scan top-level structure
-		const topLevel = fs.readdirSync(repo.path, { withFileTypes: true })
-			.filter((e) => !e.name.startsWith(".") && e.name !== "node_modules" && e.name !== "vendor")
-			.map((e) => e.isDirectory() ? `${e.name}/` : e.name)
-			.slice(0, 30);
-		parts.push(`## Directory structure\n\n\`\`\`\n${topLevel.join("\n")}\n\`\`\``);
-
-		const contextContent = `---
+	writeGeneratedFile(packPath, "20-context/overview.md", `---
 type: context-pack
-id: context.${packSlug}.${repo.name}
-title: ${repo.name}
+id: context.${packSlug}.overview
+title: ${title} Overview
 status: active
 source_of_truth: false
 freshness: current
@@ -772,34 +1361,75 @@ last_reviewed: ${today}
 tags:
   - pack/${packSlug}
   - agent-memory/context-pack
-  - repo/${repo.name}
 ---
 
-# ${repo.name}
+# ${title} Overview
 
-**Type:** ${repo.type}  
-**Description:** ${repo.description}
+Generated from \`${scanDir}\`.
 
-${parts.join("\n\n")}
+## Repositories
+
+${repos.map((r) => `- [[packs/${packSlug}/20-context/${r.slug}|${r.name}]] — ${r.type}, ${r.status}, ${r.description}`).join("\n") || "No repositories observed."}
 
 ## Related
 
 - [[packs/${packSlug}/00-system/pi-agent/resource-map|Resource Map]]
-`;
-		const contextPath = path.join(packPath, `20-context/${repo.name}.md`);
-		fs.writeFileSync(contextPath, contextContent);
-		filesCreated.push(contextPath);
+- [[packs/${packSlug}/00-system/indexes/context-index|Context Index]]
+`, filesCreated);
+	contextEntries.push(`| [[packs/${packSlug}/20-context/overview|${title} Overview]] | Workspace overview generated from ${scanDir}. |`);
 
-		contextEntries.push(
-			`| [[packs/${packSlug}/20-context/${repo.name}\\|${repo.name}]] | ${repo.type} — ${repo.description.slice(0, 60)} |`,
-		);
+	for (const repo of repos) {
+		writeGeneratedFile(packPath, `20-context/${repo.slug}.md`, repoContextNote(packSlug, repo, today), filesCreated);
+		writeGeneratedFile(packPath, `30-projects/${repo.slug}.md`, repoProjectNote(packSlug, repo, today), filesCreated);
+		contextEntries.push(`| [[packs/${packSlug}/20-context/${repo.slug}|${repo.name}]] | ${repo.type} — ${repo.description.slice(0, 80)} |`);
+		projectEntries.push(`| [[packs/${packSlug}/30-projects/${repo.slug}|${repo.name}]] | ${repo.status} ${repo.type} repository. |`);
+		if (repo.safeCommands.length > 0) {
+			writeGeneratedFile(packPath, `70-runbooks/${repo.slug}-development.md`, repoRunbookNote(packSlug, repo, today).replace("\n-title:", "\ntitle:"), filesCreated);
+			runbookEntries.push(`| [[packs/${packSlug}/70-runbooks/${repo.slug}-development|${repo.name} Development Runbook]] | Safe generated setup/check commands. |`);
+		}
 	}
 
-	// --- Generate context index ---
-	const contextIndexContent = `---
+	writeGeneratedFile(packPath, "60-observations/workspace-repository-map.md", `---
+type: observation
+id: observation.${packSlug}.workspace-repository-map
+title: Workspace Repository Map
+status: active
+source_of_truth: false
+freshness: current
+last_reviewed: ${today}
+tags:
+  - pack/${packSlug}
+  - agent-memory/observation
+---
+
+# Workspace Repository Map
+
+## Generated discovery
+
+| Repository | Type | Status | Observations |
+|---|---|---|---|
+${repos.map((r) => `| ${r.name} | ${r.type} | ${r.status} | ${r.observations.slice(0, 3).join("<br>") || "No generated observations."} |`).join("\n") || "| none | unknown | placeholder | No repositories observed. |"}
+
+## Related
+
+- [[packs/${packSlug}/00-system/pi-agent/resource-map|Resource Map]]
+- [[packs/${packSlug}/00-system/indexes/observation-index|Observation Index]]
+`, filesCreated);
+
+	const indexSpecs: Array<[string, string, string[]]> = [
+		["context-index.md", "Context Index", contextEntries],
+		["project-index.md", "Project Index", projectEntries],
+		["action-index.md", "Action Index", ["| <Add wikilink> | <Purpose> |"]],
+		["decision-index.md", "Decision Index", ["| <Add wikilink> | <Purpose> |"]],
+		["observation-index.md", "Observation Index", [`| [[packs/${packSlug}/60-observations/workspace-repository-map|Workspace Repository Map]] | Generated repository discovery observations. |`]],
+		["runbook-index.md", "Runbook Index", runbookEntries.length ? runbookEntries : ["| <Add wikilink> | <Purpose> |"]],
+		["session-index.md", "Session Index", ["| <Add wikilink> | <Purpose> |"]],
+	];
+	for (const [filename, heading, rows] of indexSpecs) {
+		writeGeneratedFile(packPath, `00-system/indexes/${filename}`, `---
 type: index
-id: index.${packSlug}.context-index
-title: Context Index
+id: index.${packSlug}.${filename.replace(/\.md$/, "")}
+title: ${heading}
 status: active
 source_of_truth: true
 freshness: current
@@ -809,15 +1439,13 @@ tags:
   - pack/${packSlug}
 ---
 
-# Context Index
+# ${heading}
 
 | Note | Use |
 |---|---|
-${contextEntries.join("\n")}
-`;
-	const contextIndexPath = path.join(packPath, "00-system/indexes/context-index.md");
-	fs.writeFileSync(contextIndexPath, contextIndexContent);
-	filesCreated.push(contextIndexPath);
+${rows.join("\n")}
+`, filesCreated);
+	}
 
 	return { packPath, filesCreated };
 }
@@ -834,16 +1462,26 @@ export function _setVaultRoot(root: string) {
 export function _setActivePack(pack: string, packPath: string) {
 	activePack = pack;
 	activePackPath = packPath;
+	qmdCollection = `memctx-${pack}`;
 }
 export function _setQmdAvailable(available: boolean) {
 	qmdAvailable = available;
+	qmdBin = available ? (qmdBin || "qmd") : "";
+	qmdStatus = available ? { available: true, bin: qmdBin, source: "path" } : { available: false, source: "missing" };
+}
+export function _setStrictMode(enabled: boolean) {
+	strictMode = enabled;
 }
 export function _resetState() {
 	vaultRoot = "";
 	activePack = "";
 	activePackPath = "";
 	qmdAvailable = false;
+	qmdBin = "";
+	qmdStatus = { available: false, source: "missing" };
 	qmdCollection = "";
+	strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
+	lastRetrieval = null;
 	_packsDir = "";
 }
 
@@ -891,8 +1529,10 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		if (ctx.hasUI) {
-			const qmdStatus = qmdAvailable ? "qmd ✓" : "qmd ✗ (keyword search only)";
-			ctx.ui.notify(`memctx: Pack "${activePack}" loaded. ${qmdStatus}`, "info");
+			const qmdLabel = qmdAvailable
+				? `qmd ✓ (${qmdStatus.source})`
+				: "qmd ✗ (grep fallback)";
+			ctx.ui.notify(`memctx: Pack "${activePack}" loaded. ${qmdLabel}`, "info");
 			ctx.ui.setStatus("memctx", `📦 ${activePack}`);
 		}
 	});
@@ -901,23 +1541,50 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (!activePackPath) return;
 
-		// Semantic search for relevant memories
 		let searchResults = "";
-		if (qmdAvailable && event.prompt) {
-			const sanitized = (event.prompt ?? "").replace(/[^\w\s.,?!-]/g, "").slice(0, 200);
-			if (sanitized.trim()) {
-				searchResults = await qmdSearch(sanitized, qmdCollection, 3);
-			}
+		let retrievalMode: RetrievalStatus["mode"] = "none";
+		let resultCount = 0;
+		const sanitized = (event.prompt ?? "").replace(/[^\w\s.,?!-]/g, "").slice(0, 240).trim();
+
+		if (sanitized) {
+			const retrieval = await searchPackMemory(activePackPath, sanitized, 3, qmdAvailable ? "semantic" : "keyword");
+			searchResults = retrieval.text;
+			retrievalMode = retrieval.mode;
+			resultCount = retrieval.matchCount;
 		}
+
+		lastRetrieval = {
+			prompt: truncate(event.prompt ?? "", 200),
+			mode: retrievalMode,
+			query: sanitized,
+			resultCount,
+			timestamp: nowTimestamp(),
+		};
 
 		const packContext = buildPackContext(activePackPath, searchResults);
 		if (!packContext) return;
 
+		const memoryGate = [
+			"## Memory Gate",
+			"For project-specific questions:",
+			"1. Use the loaded memory context first.",
+			"2. If relevant facts may exist outside the injected context, call memctx_search before answering.",
+			"3. If memory is insufficient or conflicts with source files, inspect source-of-truth files.",
+			"4. If you discover durable safe knowledge, save or suggest saving it with memctx_save.",
+			"5. Never save secrets, credentials, private keys, tokens, customer data, or sensitive payloads.",
+			strictMode
+				? "6. Strict mode is ON: before final answers for project-specific prompts, call memctx_search unless the answer is fully supported by injected memory context."
+				: "",
+		].filter(Boolean).join("\n");
+
 		const injection = [
 			"\n\n## Memory Context",
 			`Active pack: \`${activePack}\``,
+			`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"})`,
 			"The following memory context has been loaded from the pack.",
 			"Use the memctx_search tool to find additional context across pack files.",
+			"",
+			memoryGate,
 			"",
 			packContext,
 		].join("\n");
@@ -979,6 +1646,55 @@ export default function (pi: ExtensionAPI) {
 	// --- session_shutdown: cleanup ---
 	pi.on("session_shutdown", async (_event, _ctx) => {
 		// Nothing to flush at the moment
+	});
+
+	// --- /pack-status command: show active pack and retrieval state ---
+	pi.registerCommand("pack-status", {
+		description: "Show active memory pack, qmd, retrieval, and strict-mode status.",
+		handler: async (_args, ctx) => {
+			const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
+			const packFileCount = activePackPath ? scanPackFiles(activePackPath).length : 0;
+			const retrieval = lastRetrieval
+				? [
+					`Last retrieval: ${lastRetrieval.mode}`,
+					`  query: ${lastRetrieval.query || "<none>"}`,
+					`  results: ${lastRetrieval.resultCount}`,
+					`  at: ${lastRetrieval.timestamp}`,
+				]
+				: ["Last retrieval: none"];
+			const lines = [
+				`Active pack: ${activePack || "<none>"}`,
+				`Pack path: ${activePackPath || "<none>"}`,
+				`Packs dir: ${packsDir || "<none>"}`,
+				`Pack files: ${packFileCount} markdown files`,
+				`qmd: ${qmdStatus.available ? "available" : "unavailable"}`,
+				`qmd source: ${qmdStatus.source}`,
+				`qmd bin: ${qmdStatus.bin ?? "<none>"}`,
+				`qmd version: ${qmdStatus.version ?? "<unknown>"}`,
+				`qmd error: ${qmdStatus.error ?? "<none>"}`,
+				`qmd collection: ${qmdCollection || "<none>"}`,
+				`Strict mode: ${strictMode ? "on" : "off"}`,
+				...retrieval,
+			];
+			ctx.ui.notify(lines.join("\n"), "info");
+		},
+	});
+
+	// --- /memctx-strict command: toggle strict memory gate ---
+	pi.registerCommand("memctx-strict", {
+		description: "Toggle strict memory retrieval guidance. Usage: /memctx-strict [on|off|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["on", "true", "1", "yes"].includes(target)) {
+				strictMode = true;
+			} else if (["off", "false", "0", "no"].includes(target)) {
+				strictMode = false;
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-strict [on|off|status]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx: Strict mode ${strictMode ? "on" : "off"}.`, "info");
+		},
 	});
 
 	// --- /pack command: list and switch packs ---
@@ -1062,7 +1778,8 @@ export default function (pi: ExtensionAPI) {
 			let packsDir = _packsDir;
 			if (!packsDir) {
 				// Try to find existing packs dir
-				packsDir = resolvePacksDir(ctx.cwd);
+				const resolvedPacksDir = resolvePacksDir(ctx.cwd);
+				if (resolvedPacksDir) packsDir = resolvedPacksDir;
 			}
 			if (!packsDir) {
 				// Create default global packs directory
@@ -1154,42 +1871,10 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const { query, mode = "keyword", limit = 5 } = params;
+			const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+			const search = await searchPackMemory(activePackPath, query, limit, mode as SearchMode);
 
-			// Try qmd first
-			if (qmdAvailable) {
-				const results = await qmdSearch(query, qmdCollection, limit, mode as any);
-				if (results) {
-					return {
-						content: [{ type: "text" as const, text: results }],
-						details: { mode, collection: qmdCollection },
-					};
-				}
-			}
-
-			// Fallback: grep-based search
-			const files = scanPackFiles(activePackPath);
-			const matches: string[] = [];
-			const queryLower = query.toLowerCase();
-			const terms = queryLower.split(/\s+/).filter(Boolean);
-
-			for (const f of files) {
-				if (matches.length >= limit) break;
-				const content = readFileSafe(f);
-				if (!content) continue;
-				const contentLower = content.toLowerCase();
-				const score = terms.filter((t) => contentLower.includes(t)).length;
-				if (score > 0) {
-					const rel = path.relative(activePackPath, f);
-					// Extract matching lines
-					const lines = content.split("\n");
-					const matchingLines = lines
-						.filter((line) => terms.some((t) => line.toLowerCase().includes(t)))
-						.slice(0, 5);
-					matches.push(`### ${rel} (${score}/${terms.length} terms matched)\n${matchingLines.join("\n")}`);
-				}
-			}
-
-			if (matches.length === 0) {
+			if (search.matchCount === 0) {
 				// Try cross-pack search to suggest the right pack
 				const packsDir = _packsDir || path.join(vaultRoot, "packs");
 				const allPacks = listPacks(packsDir);
@@ -1219,18 +1904,21 @@ export default function (pi: ExtensionAPI) {
 						type: "text" as const,
 						text: `No results for "${query}" in pack "${activePack}".${hint}`,
 					}],
-					details: { mode: qmdAvailable ? mode : "grep-fallback", crossPackHints: crossResults },
+					details: { mode: search.mode, crossPackHints: crossResults },
 				};
 			}
 
+			const header = search.mode === "qmd"
+				? `## Search results (qmd ${mode})`
+				: "## Search results (grep fallback)";
 			return {
 				content: [
 					{
 						type: "text" as const,
-						text: `## Search results (grep fallback, qmd not available)\n\n${matches.join("\n\n")}`,
+						text: `${header}\n\n${search.text}`,
 					},
 				],
-				details: { mode: "grep-fallback", matchCount: matches.length },
+				details: { mode: search.mode, matchCount: search.matchCount, collection: qmdCollection },
 			};
 		},
 	});

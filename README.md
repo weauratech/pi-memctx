@@ -90,6 +90,12 @@ Less tokens = lower API cost. Better answers = less rework. Faster responses = l
 ## Install
 
 ```bash
+pi install npm:pi-memctx
+```
+
+Or install directly from GitHub:
+
+```bash
 pi install git:github.com/weauratech/pi-memctx
 ```
 
@@ -105,7 +111,7 @@ pi -e pi-memctx
 /pack-generate
 ```
 
-This scans your repos for `README.md`, `CLAUDE.md`, `go.mod`, `package.json` and builds a memory pack automatically.
+This performs deterministic discovery across your repos — including read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints — then builds a structured memory pack automatically.
 
 ### 2. Let the agent learn organically
 
@@ -138,7 +144,7 @@ pi starts → detect pack for cwd → load context
                                       │
 user sends prompt ────────────────────┤
                                       │
-  1. Search pack for relevant memories (qmd semantic or grep)
+  1. Search pack for relevant memories (qmd when available, grep fallback otherwise)
   2. Build prioritized context (manifest → context → search → actions → decisions → runbooks)
   3. Inject into system prompt (16K char budget)
                                       │
@@ -188,38 +194,97 @@ Packs are just Markdown files with frontmatter. Edit them in any editor or Obsid
 
 ## Tools
 
-### memctx_search
+pi-memctx exposes tools to the agent. You can ask the agent to use them directly, and the extension also performs automatic retrieval before each turn.
 
-Search across pack files:
+### `memctx_search`
 
-```
+Search across active-pack files:
+
+```txt
 use memctx_search to find information about deploy
 ```
 
-Modes: `keyword` (fast), `semantic` (~2s), `deep` (~10s).
+Parameters:
 
-Install [qmd](https://github.com/tobi/qmd) for semantic search: `npm install -g @tobilu/qmd`
+| Parameter | Values | Default | Purpose |
+|---|---|---:|---|
+| `query` | string | required | Search terms or natural-language query. |
+| `mode` | `keyword`, `semantic`, `deep` | `keyword` | Search strategy. Semantic/deep require qmd. |
+| `limit` | number | `5` | Maximum result count. |
 
-Without qmd, search uses keyword grep (still works, just less smart).
+Search behavior:
 
-### memctx_save
+1. qmd keyword/semantic/deep search when qmd is available;
+2. grep-style Markdown fallback when qmd is unavailable, times out, or misses;
+3. cross-pack hints when the active pack has no match but another pack appears relevant.
+
+qmd resolution order:
+
+1. `MEMCTX_QMD_BIN`
+2. `qmd` on `PATH`
+3. optional bundled `@tobilu/qmd` dependency at `node_modules/.bin/qmd`
+4. grep fallback
+
+Tuning:
+
+```bash
+MEMCTX_QMD_PROBE_TIMEOUT_MS=3000  # default: 1200
+```
+
+Without qmd, both automatic context injection and `memctx_search` use keyword grep fallback.
+
+### `memctx_save`
 
 Persist learnings to the active pack:
 
-```
+```txt
 save this as a decision: we use integer cents for all monetary values
 ```
 
-Types: `observation`, `decision`, `action`, `runbook`, `context`.
+Parameters:
 
-**Safety:** automatically blocks secrets, tokens, API keys, private keys.
+| Parameter | Values | Purpose |
+|---|---|---|
+| `type` | `observation`, `decision`, `action`, `runbook`, `context` | Destination note type. |
+| `title` | string | Note title and filename slug source. |
+| `content` | string | Markdown body. |
+| `tags` | string[] | Optional extra tags. |
+
+Behavior:
+
+- writes Markdown notes with frontmatter into the active pack;
+- appends to existing notes with the same slug;
+- updates a matching index when available;
+- blocks common secret, token, API key, AWS key, and private-key patterns.
 
 ## Commands
 
-| Command | What |
-|---|---|
-| `/pack` | Switch packs (picker or `/pack name`) |
-| `/pack-generate` | Generate pack from repo directory |
+These slash commands are available inside Pi after the extension loads.
+
+| Command | Usage | What |
+|---|---|---|
+| `/pack` | `/pack` or `/pack <name>` | List packs with a picker or switch directly. |
+| `/pack-status` | `/pack-status` | Show active pack, pack path, qmd status/source/bin/error, qmd collection, strict mode, file count, and last retrieval. |
+| `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. In strict mode, project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
+| `/pack-generate` | `/pack-generate [path] [slug]` | Generate a structured pack from a directory of repositories. |
+
+### `/pack-status` example
+
+```txt
+Active pack: opensource
+Pack path: ~/.pi/agent/memory-vault/packs/opensource
+qmd: unavailable
+qmd source: local-dependency
+qmd error: probe timed out
+Strict mode: off
+Last retrieval: grep-fallback
+```
+
+### `/pack-generate` discovery
+
+`/pack-generate` now performs deterministic local discovery before writing notes. It detects normal repos, hidden allowlist repos like `.github`, Git remotes, Node/TS and Go manifests, package scripts, safe commands, GitHub Actions, read-first docs, infra hints, placeholder repos, and redacts sensitive-looking values before persistence.
+
+See [Pack generation](docs/pack-generate.md) for details.
 
 ## Multiple packs
 
@@ -262,6 +327,7 @@ bash benchmark/run.sh
 - [Safety](docs/safety.md)
 - [Search](docs/search.md)
 - [Persistence](docs/persistence.md)
+- [Pack generation](docs/pack-generate.md)
 - [Development](docs/development.md)
 - [Publishing](docs/publishing.md)
 

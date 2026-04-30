@@ -15,12 +15,14 @@ import {
 	_resetState,
 	_setActivePack,
 	_setQmdAvailable,
+	_setStrictMode,
 	_setVaultRoot,
 	buildNote,
 	buildPackContext,
 	buildSessionHandoff,
 	detectActivePack,
 	findVaultRoot,
+	generatePackFromDirectory,
 	listPacks,
 	nowTimestamp,
 	readFileSafe,
@@ -818,6 +820,16 @@ describe("extension registration", () => {
 		expect(commands["pack"]).toBeDefined();
 		expect(commands["pack"].description).toContain("switch");
 	});
+
+	test("registers /pack-status and /memctx-strict commands", () => {
+		const { pi, commands } = createMockPi();
+		registerExtension(pi as any);
+
+		expect(commands["pack-status"]).toBeDefined();
+		expect(commands["pack-status"].description).toContain("status");
+		expect(commands["memctx-strict"]).toBeDefined();
+		expect(commands["memctx-strict"].description).toContain("strict");
+	});
 });
 
 // ==========================================================================
@@ -976,6 +988,39 @@ describe("before_agent_start context injection", () => {
 		)) as any;
 
 		expect(result.systemPrompt).toContain("memctx_search");
+	});
+
+	test("uses grep fallback retrieval during context injection when qmd is unavailable", async () => {
+		const { packPath } = createTestVault();
+		const { pi, hooks } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+		_setQmdAvailable(false);
+
+		const result = (await hooks["before_agent_start"](
+			{ prompt: "PostgreSQL database", systemPrompt: "" },
+			createMockCtx(),
+		)) as any;
+
+		expect(result.systemPrompt).toContain("Retrieval: grep-fallback");
+		expect(result.systemPrompt).toContain("Relevant Memory");
+		expect(result.systemPrompt).toContain("PostgreSQL");
+	});
+
+	test("injects Memory Gate and strict-mode guidance", async () => {
+		const { packPath } = createTestVault();
+		const { pi, hooks } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+		_setStrictMode(true);
+
+		const result = (await hooks["before_agent_start"](
+			{ prompt: "what stack do we use?", systemPrompt: "" },
+			createMockCtx(),
+		)) as any;
+
+		expect(result.systemPrompt).toContain("Memory Gate");
+		expect(result.systemPrompt).toContain("Strict mode is ON");
 	});
 });
 
@@ -1271,7 +1316,66 @@ describe("memctx_save tool", () => {
 });
 
 // ==========================================================================
-// 15. Integration: full flow
+// 15. pack-generate deterministic discovery
+// ==========================================================================
+
+describe("pack-generate deterministic discovery", () => {
+	beforeEach(setupTmpDir);
+	afterEach(cleanupTmpDir);
+
+	test("generates rich pack from workspace discovery", () => {
+		const scanDir = path.join(tmpDir, "workspace");
+		const packsDir = path.join(tmpDir, "packs");
+		fs.mkdirSync(path.join(scanDir, ".github", "profile"), { recursive: true });
+		fs.writeFileSync(path.join(scanDir, ".github", "profile", "README.md"), "# Org\n\nPublic organization profile.");
+
+		const nodeRepo = path.join(scanDir, "node-app");
+		fs.mkdirSync(path.join(nodeRepo, ".github", "workflows"), { recursive: true });
+		fs.writeFileSync(path.join(nodeRepo, "package.json"), JSON.stringify({
+			name: "node-app",
+			description: "Node app description",
+			scripts: { dev: "next dev", build: "next build", test: "vitest", deploy: "danger" },
+			dependencies: { next: "latest", react: "latest" },
+		}, null, 2));
+		fs.writeFileSync(path.join(nodeRepo, "README.md"), "# Node App\n\nA generated Node application.");
+		fs.writeFileSync(path.join(nodeRepo, "AGENTS.md"), "# Agents\n\nRun tests before changes.");
+		fs.writeFileSync(path.join(nodeRepo, ".github", "workflows", "ci.yml"), "name: CI\non: [push]\njobs: {}\n");
+		fs.writeFileSync(path.join(nodeRepo, ".env"), "API_KEY=super-secret-value");
+
+		const goRepo = path.join(scanDir, "go-service");
+		fs.mkdirSync(goRepo, { recursive: true });
+		fs.writeFileSync(path.join(goRepo, "go.mod"), "module example.com/go-service\n\ngo 1.22\n");
+
+		const emptyRepo = path.join(scanDir, "empty-repo");
+		fs.mkdirSync(path.join(emptyRepo, ".git"), { recursive: true });
+
+		const result = generatePackFromDirectory(scanDir, "workspace", packsDir);
+		expect(result.filesCreated.length).toBeGreaterThan(15);
+		expect(fs.existsSync(path.join(result.packPath, "20-context", "github-profile.md"))).toBe(true);
+		expect(fs.existsSync(path.join(result.packPath, "20-context", "node-app.md"))).toBe(true);
+		expect(fs.existsSync(path.join(result.packPath, "30-projects", "node-app.md"))).toBe(true);
+		expect(fs.existsSync(path.join(result.packPath, "70-runbooks", "node-app-development.md"))).toBe(true);
+		expect(fs.existsSync(path.join(result.packPath, "70-runbooks", "go-service-development.md"))).toBe(true);
+
+		const resourceMap = fs.readFileSync(path.join(result.packPath, "00-system", "pi-agent", "resource-map.md"), "utf-8");
+		expect(resourceMap).toContain(".github");
+		expect(resourceMap).toContain("node-app");
+		expect(resourceMap).toContain("go-service");
+		expect(resourceMap).toContain("empty-repo");
+		expect(resourceMap).toContain("placeholder");
+
+		const nodeContext = fs.readFileSync(path.join(result.packPath, "20-context", "node-app.md"), "utf-8");
+		expect(nodeContext).toContain("Node app description");
+		expect(nodeContext).toContain("npm run build");
+		expect(nodeContext).toContain("ci.yml");
+		expect(nodeContext).not.toContain("super-secret-value");
+		expect(nodeContext).not.toContain("API_KEY");
+		expect(nodeContext).not.toContain("npm run deploy");
+	});
+});
+
+// ==========================================================================
+// 16. Integration: full flow
 // ==========================================================================
 
 describe("integration: full flow", () => {

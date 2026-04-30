@@ -26,6 +26,8 @@ Use `/pack-generate` inside a Pi session:
 /pack-generate /path/to/repos my-project
 ```
 
+The generator performs deterministic local discovery of repositories, read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints. See [Pack generation](pack-generate.md).
+
 Or create folders manually:
 
 ```txt
@@ -46,6 +48,13 @@ See `examples/basic-pack/` for a minimal public-safe pack.
 ```txt
 /pack
 /pack my-project
+/pack-status
+```
+
+Use strict mode when you want stronger retrieval guidance before project-specific answers:
+
+```txt
+/memctx-strict on
 ```
 
 Ask the agent to search memory:
@@ -53,6 +62,8 @@ Ask the agent to search memory:
 ```txt
 Use memctx_search to find the deploy runbook.
 ```
+
+pi-memctx also retrieves prompt-relevant memory automatically before each turn. It uses qmd when available and grep fallback otherwise.
 
 Ask the agent to save durable memory:
 
