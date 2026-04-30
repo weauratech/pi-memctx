@@ -985,12 +985,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("pack", {
 		description: "List or switch memory packs. Usage: /pack [name]",
 		handler: async (args, ctx) => {
-			if (!vaultRoot) {
-				ctx.ui.notify("memctx: No vault loaded.", "error");
+			const packsDir = _packsDir || resolvePacksDir(ctx.cwd);
+			if (!packsDir) {
+				ctx.ui.notify("memctx: No packs found. Use /pack-generate to create one.", "error");
 				return;
 			}
 
-			const packsDir = _packsDir || path.join(vaultRoot, "packs");
 			const packs = listPacks(packsDir);
 
 			if (packs.length === 0) {
@@ -1058,10 +1058,16 @@ export default function (pi: ExtensionAPI) {
 	pi.registerCommand("pack-generate", {
 		description: "Generate a memory pack from a directory of repos. Usage: /pack-generate [path] [slug]",
 		handler: async (args, ctx) => {
-			const packsDir = _packsDir || path.join(vaultRoot, "packs");
-			if (!packsDir && !vaultRoot) {
-				ctx.ui.notify("memctx: No vault loaded.", "error");
-				return;
+			// Resolve packs directory — create default if none exists
+			let packsDir = _packsDir;
+			if (!packsDir) {
+				// Try to find existing packs dir
+				packsDir = resolvePacksDir(ctx.cwd);
+			}
+			if (!packsDir) {
+				// Create default global packs directory
+				packsDir = DEFAULT_GLOBAL_PACKS_DIR;
+				fs.mkdirSync(packsDir, { recursive: true });
 			}
 
 			const parts = (args ?? "").trim().split(/\s+/);
@@ -1109,6 +1115,8 @@ export default function (pi: ExtensionAPI) {
 			);
 
 			// Auto-switch to the new pack
+			_packsDir = packsDir;
+			vaultRoot = path.dirname(packsDir);
 			activePack = slug;
 			activePackPath = packPath;
 			qmdCollection = `memctx-${slug}`;
