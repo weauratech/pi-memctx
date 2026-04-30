@@ -1,0 +1,20 @@
+{
+  "name": "pi-memctx",
+  "version": "0.1.0",
+  "description": "Automatic memory context injection for pi coding agent. Load, search, and persist knowledge across sessions using Markdown packs.",
+  "keywords": ["pi-package", "pi-coding-agent", "memory", "context-injection", "obsidian"],
+  "license": "MIT",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@sinclair/typebox": "*"
+  },
+  "scripts": {
+    "test": "bun test test/",
+    "typecheck": "tsc --noEmit"
+  }
+}
