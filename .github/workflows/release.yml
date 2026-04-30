@@ -58,7 +58,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
-        run: npm ci --omit=optional --omit=peer
+        run: npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false
 
       - name: Run CI
         run: npm run ci

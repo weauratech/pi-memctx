@@ -12,7 +12,7 @@ pi install git:github.com/weauratech/pi-memctx
 Releases are tag-driven. Pushing a tag like `v0.3.0` runs `.github/workflows/release.yml`, which:
 
 1. validates that the tag version matches `package.json`;
-2. installs dependencies with `npm ci --omit=optional --omit=peer`;
+2. installs dependencies with `npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false`;
 3. runs `npm run ci`;
 4. extracts release notes from `CHANGELOG.md`;
 5. runs `npm pack --json`;

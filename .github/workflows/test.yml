@@ -22,7 +22,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - name: Install dependencies
-        run: npm ci --omit=optional --omit=peer
+        run: npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false
 
       - name: Run CI
         run: npm run ci
