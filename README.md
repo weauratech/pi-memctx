@@ -1,6 +1,34 @@
-# pi-memctx
+<p align="center">
+  <img src="https://em-content.zobj.net/source/apple/391/card-file-box_1f5c3-fe0f.png" width="120" alt="Card file box emoji" />
+</p>
 
-Automatic memory context injection for [pi coding agent](https://github.com/mariozechner/pi-mono).
+<h1 align="center">pi-memctx</h1>
+
+<p align="center">
+  <strong>Local-first memory context for Pi coding agents.</strong>
+</p>
+
+<p align="center">
+  <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/github/stars/weauratech/pi-memctx?style=flat&color=yellow" alt="Stars"></a>
+  <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
+  <a href="package.json"><img src="https://img.shields.io/github/package-json/v/weauratech/pi-memctx?style=flat" alt="Version"></a>
+</p>
+
+<p align="center">
+  <a href="#what-it-does">What it does</a> •
+  <a href="#install">Install</a> •
+  <a href="#setup">Setup</a> •
+  <a href="#context-injection-priority">Context</a> •
+  <a href="#tools">Tools</a> •
+  <a href="#commands">Commands</a> •
+  <a href="#documentation">Docs</a> •
+  <a href="#development">Development</a>
+</p>
+
+---
+
+Automatic memory context injection for [Pi coding agent](https://github.com/mariozechner/pi-mono).
 
 **Your agent forgets everything between sessions.** Every new conversation starts from zero — re-discovering project structure, re-reading conventions, re-asking about deploy procedures. pi-memctx fixes this.
 
@@ -227,13 +255,27 @@ bash benchmark/setup.sh
 bash benchmark/run.sh
 ```
 
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [Safety](docs/safety.md)
+- [Search](docs/search.md)
+- [Persistence](docs/persistence.md)
+- [Development](docs/development.md)
+- [Publishing](docs/publishing.md)
+
 ## Development
 
 ```bash
-npm install
-bun test test/          # 80 unit tests
-bun run test/e2e.ts     # e2e tests
+npm ci
+npm run typecheck
+npm test
+npm run test:e2e
+npm run ci
 ```
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a pull request.
 
 ## License
 

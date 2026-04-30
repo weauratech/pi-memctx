@@ -395,7 +395,8 @@ describe("detectActivePack", () => {
 		fs.mkdirSync(path.join(packsDir, "alpha"), { recursive: true });
 		// Returns first in readdir order (implementation-dependent)
 		const result = detectActivePack(packsDir);
-		expect(["zebra", "alpha"]).toContain(result);
+		expect(result).not.toBeNull();
+		expect(["zebra", "alpha"]).toContain(result!);
 	});
 
 	test("ignores .gitkeep file", () => {

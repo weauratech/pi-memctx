@@ -22,12 +22,23 @@ import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
+
+function StringEnum<T extends readonly string[]>(
+	values: T,
+	options?: { description?: string; default?: T[number] },
+) {
+	return Type.Unsafe<T[number]>({
+		type: "string",
+		enum: values,
+		...(options?.description ? { description: options.description } : {}),
+		...(options?.default ? { default: options.default } : {}),
+	});
+}
 
 /** Max chars for each context section */
 const BUDGET = {
@@ -79,7 +90,7 @@ export function findVaultRoot(startDir: string): string | null {
 		if (fs.existsSync(pkgPath)) {
 			try {
 				const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-				if (pkg.name === "agent-memory-vault") return dir;
+				if (pkg.name === "pi-memctx" || pkg.name === "agent-memory-vault") return dir;
 			} catch {
 				// not valid JSON, keep searching
 			}
@@ -1014,7 +1025,7 @@ export default function (pi: ExtensionAPI) {
 					qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 				}
 
-				ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "success");
+				ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
 				ctx.ui.setStatus("memctx", `📦 ${activePack}`);
 				return;
 			}
@@ -1038,7 +1049,7 @@ export default function (pi: ExtensionAPI) {
 				qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 			}
 
-			ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "success");
+			ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
 			ctx.ui.setStatus("memctx", `📦 ${activePack}`);
 		},
 	});
@@ -1094,7 +1105,7 @@ export default function (pi: ExtensionAPI) {
 
 			ctx.ui.notify(
 				`memctx: Pack "${slug}" generated with ${filesCreated.length} files from ${scanDir}`,
-				"success",
+				"info",
 			);
 
 			// Auto-switch to the new pack
