@@ -90,6 +90,12 @@ Less tokens = lower API cost. Better answers = less rework. Faster responses = l
 ## Install
 
 ```bash
+pi install npm:pi-memctx
+```
+
+Or install directly from GitHub:
+
+```bash
 pi install git:github.com/weauratech/pi-memctx
 ```
 

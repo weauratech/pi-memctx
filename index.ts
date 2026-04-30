@@ -1778,7 +1778,8 @@ export default function (pi: ExtensionAPI) {
 			let packsDir = _packsDir;
 			if (!packsDir) {
 				// Try to find existing packs dir
-				packsDir = resolvePacksDir(ctx.cwd);
+				const resolvedPacksDir = resolvePacksDir(ctx.cwd);
+				if (resolvedPacksDir) packsDir = resolvedPacksDir;
 			}
 			if (!packsDir) {
 				// Create default global packs directory

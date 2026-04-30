@@ -1,4 +1,4 @@
-name: Test
+name: CI Test
 
 on:
   pull_request:
@@ -9,14 +9,23 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  ci-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
+
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run ci
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: npm ci --omit=optional
+
+      - name: Run CI
+        run: npm run ci
+
+      - name: Validate package contents
+        run: npm pack --dry-run --json

@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-04-30
+
+### Added
+
+- Added `/pack-status` command with active pack, pack path, qmd status/source/bin/error, qmd collection, strict mode, file count, and last retrieval diagnostics.
+- Added `/memctx-strict on|off|status` and `MEMCTX_STRICT` support for stronger Memory Gate guidance.
+- Added automatic qmd resolution from `MEMCTX_QMD_BIN`, `PATH`, or optional bundled `@tobilu/qmd`.
+- Added `MEMCTX_QMD_PROBE_TIMEOUT_MS` to tune qmd probe timeouts.
+- Added prompt-specific retrieval before each agent turn with grep fallback when qmd is unavailable, times out, or misses.
+- Added Memory Gate guidance to injected context.
+- Added deep deterministic `/pack-generate` discovery for repositories, hidden allowlist repos like `.github`, docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe commands, infrastructure hints, placeholder repos, project notes, observations, runbooks, and indexes.
+- Added `docs/pack-generate.md`.
+- Added release automation plan support through GitHub Actions.
+
+### Changed
+
+- Moved `@sinclair/typebox` to runtime dependencies.
+- Made `@tobilu/qmd` an optional dependency so pi-memctx can degrade safely to grep fallback.
+- Pack generation now creates the full memory-pack directory structure.
+- `memctx_search` now shares the same qmd/grep fallback pipeline as automatic retrieval.
+- Documentation now describes tools, slash commands, qmd resolution, strict mode, pack status, and pack generation.
+
+### Fixed
+
+- qmd probing now fails fast and reports probe errors in `/pack-status`.
+- Generated pack content redacts high-confidence secret-looking values before persistence.
+- CI installs omit optional qmd dependencies for stable core tests.
+
+## [0.2.1] - 2026-04-30
+
 ### Added
 
 - Open-source community health files: contributing guide, security policy, support policy, code of conduct, issue templates, and pull request template.
@@ -18,7 +48,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - E2E test now generates a temporary deterministic memory pack instead of depending on local files.
 - TypeScript typecheck is part of the supported development workflow.
 
-## [0.1.0]
+## [0.1.0] - 2026-04-30
 
 ### Added
 
