@@ -19,8 +19,10 @@
   <a href="#what-it-does">What it does</a> •
   <a href="#install">Install</a> •
   <a href="#setup">Setup</a> •
+  <a href="#context-injection-priority">Context</a> •
   <a href="#tools">Tools</a> •
   <a href="#commands">Commands</a> •
+  <a href="#documentation">Docs</a> •
   <a href="#development">Development</a>
 </p>
 
@@ -170,13 +172,27 @@ npm install -g @tobilu/qmd
 
 Without qmd, search uses keyword grep (still works, just less smart).
 
+## Documentation
+
+- [Getting started](docs/getting-started.md)
+- [Architecture](docs/architecture.md)
+- [Safety](docs/safety.md)
+- [Search](docs/search.md)
+- [Persistence](docs/persistence.md)
+- [Development](docs/development.md)
+- [Publishing](docs/publishing.md)
+
 ## Development
 
 ```bash
-npm install
-bun test test/          # 80 unit tests
-bun run test/e2e.ts     # e2e tests
+npm ci
+npm run typecheck
+npm test
+npm run test:e2e
+npm run ci
 ```
+
+Please read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a pull request.
 
 ## License
 

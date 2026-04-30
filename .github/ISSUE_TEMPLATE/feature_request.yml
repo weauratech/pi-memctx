@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement to pi-memctx
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement. Do not include secrets or private memory-pack content.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem should this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: impact
+    attributes:
+      label: User impact
+      description: Who benefits, and what workflow changes?
