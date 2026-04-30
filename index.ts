@@ -81,6 +81,7 @@ export type QmdStatus = {
 	bin?: string;
 	version?: string;
 	source: QmdSource;
+	error?: string;
 };
 
 type RetrievalStatus = {
@@ -202,6 +203,30 @@ function firstExistingExecutable(candidates: string[]): string | null {
 	return null;
 }
 
+function qmdProbeTimeoutMs(): number {
+	const parsed = Number.parseInt(process.env.MEMCTX_QMD_PROBE_TIMEOUT_MS ?? "1200", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : 1200;
+}
+
+function readLocalQmdPackageVersion(binPath: string): string | undefined {
+	let dir = path.dirname(binPath);
+	for (let i = 0; i < 6; i++) {
+		const pkgPath = path.join(dir, "package.json");
+		if (fs.existsSync(pkgPath)) {
+			try {
+				const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+				if (pkg.name === "@tobilu/qmd" && pkg.version) return `qmd ${pkg.version}`;
+			} catch {
+				return undefined;
+			}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return undefined;
+}
+
 export function resolveQmdBinary(): { bin: string; source: Exclude<QmdSource, "missing"> } | null {
 	if (process.env.MEMCTX_QMD_BIN) {
 		return { bin: process.env.MEMCTX_QMD_BIN, source: "env" };
@@ -230,16 +255,24 @@ export async function detectQmdStatus(): Promise<QmdStatus> {
 	if (!resolved) return { available: false, source: "missing" };
 
 	return new Promise((resolve) => {
-		execFile(resolved.bin, ["--version"], { timeout: 5000 }, (err, stdout, stderr) => {
+		const fallbackVersion = readLocalQmdPackageVersion(resolved.bin);
+		execFile(resolved.bin, ["--version"], { timeout: qmdProbeTimeoutMs() }, (err, stdout, stderr) => {
 			if (err) {
-				resolve({ available: false, bin: resolved.bin, source: resolved.source });
+				const message = err instanceof Error ? err.message : String(err);
+				resolve({
+					available: false,
+					bin: resolved.bin,
+					source: resolved.source,
+					version: fallbackVersion,
+					error: message.includes("timed out") ? "probe timed out" : message,
+				});
 				return;
 			}
 			resolve({
 				available: true,
 				bin: resolved.bin,
 				source: resolved.source,
-				version: (stdout || stderr).trim().split(/\s+/).slice(0, 3).join(" "),
+				version: (stdout || stderr).trim().split(/\s+/).slice(0, 3).join(" ") || fallbackVersion,
 			});
 		});
 	});
@@ -1638,6 +1671,7 @@ export default function (pi: ExtensionAPI) {
 				`qmd source: ${qmdStatus.source}`,
 				`qmd bin: ${qmdStatus.bin ?? "<none>"}`,
 				`qmd version: ${qmdStatus.version ?? "<unknown>"}`,
+				`qmd error: ${qmdStatus.error ?? "<none>"}`,
 				`qmd collection: ${qmdCollection || "<none>"}`,
 				`Strict mode: ${strictMode ? "on" : "off"}`,
 				...retrieval,
