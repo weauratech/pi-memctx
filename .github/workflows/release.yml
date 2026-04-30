@@ -115,9 +115,11 @@ jobs:
           PACKAGE="@weauratech/pi-memctx"
           REGISTRY="https://npm.pkg.github.com"
 
-          cat > ~/.npmrc <<EOF
+          NPMRC="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+          cat >> "$NPMRC" <<EOF
           @weauratech:registry=$REGISTRY
           //npm.pkg.github.com/:_authToken=$NODE_AUTH_TOKEN
+          always-auth=true
           EOF
 
           if npm view "$PACKAGE@$VERSION" version --registry="$REGISTRY" >/dev/null 2>&1; then
