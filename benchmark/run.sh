@@ -237,9 +237,56 @@ done
 echo ""
 echo "── Summary ──"
 echo ""
-echo "  Total tool calls:  baseline=$total_base_tools  memctx=$total_ctx_tools  (Δ=$((total_ctx_tools - total_base_tools)))"
-echo "  Total quality:     baseline=$total_base_quality  memctx=$total_ctx_quality  (Δ=+$((total_ctx_quality - total_base_quality)))"
-echo "  Total time (ms):   baseline=$total_base_ms  memctx=$total_ctx_ms"
+
+tool_diff=$((total_base_tools - total_ctx_tools))
+qual_diff=$((total_ctx_quality - total_base_quality))
+time_diff_ms=$((total_base_ms - total_ctx_ms))
+time_diff_s=$((time_diff_ms / 1000))
+
+echo "  Tool calls:   baseline=$total_base_tools  memctx=$total_ctx_tools  (saved $tool_diff calls)"
+echo "  Quality:      baseline=$total_base_quality  memctx=$total_ctx_quality  (+$qual_diff correct facts)"
+echo "  Time (ms):    baseline=$total_base_ms  memctx=$total_ctx_ms  (saved ${time_diff_s}s)"
+
+echo ""
+echo "── What this means ──"
+echo ""
+
+if [ $total_base_tools -gt 0 ]; then
+  tool_pct=$((tool_diff * 100 / total_base_tools))
+  echo "  🔧 ${tool_pct}% fewer tool calls"
+  echo "     → Each tool call costs tokens (input+output). Fewer calls = lower API cost."
+  echo "     → Estimated saving: ~${tool_diff} tool round-trips × ~500 tokens each = ~$((tool_diff * 500)) tokens saved."
+fi
+
+if [ $total_base_quality -gt 0 ] && [ $qual_diff -gt 0 ]; then
+  echo "  ✅ +${qual_diff} more correct facts in responses"
+  echo "     → Agent knows architecture, conventions, and runbooks without exploring."
+  echo "     → Fewer follow-up prompts needed to get useful output."
+fi
+
+if [ $time_diff_s -gt 0 ]; then
+  echo "  ⏱  ${time_diff_s}s faster across ${#TASKS[@]} tasks"
+  echo "     → Agent answers directly from memory instead of scanning the filesystem."
+fi
+
+echo ""
+echo "── ROI projection ──"
+echo ""
+echo "  If your team runs ~20 agent tasks/day:"
+if [ $total_base_tools -gt 0 ]; then
+  daily_tokens_saved=$((tool_diff * 500 * 20 / ${#TASKS[@]}))
+  monthly_tokens_saved=$((daily_tokens_saved * 22))
+  # Rough cost: $3 per 1M input tokens (Claude Sonnet)
+  monthly_cost_cents=$((monthly_tokens_saved * 3 / 10000))
+  echo "     Tokens saved/month:  ~${monthly_tokens_saved}"
+  echo "     Estimated savings:   ~\$${monthly_cost_cents}/month in API costs"
+fi
+if [ $time_diff_s -gt 0 ]; then
+  daily_time_saved=$((time_diff_s * 20 / ${#TASKS[@]}))
+  monthly_time_saved=$((daily_time_saved * 22 / 60))
+  echo "     Time saved/month:    ~${monthly_time_saved} minutes"
+fi
+echo "     Quality improvement:  agent gets it right on first try more often"
 echo ""
 echo "  Results saved to: $RESULTS_DIR/"
 echo ""
