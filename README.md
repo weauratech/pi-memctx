@@ -105,7 +105,7 @@ pi -e pi-memctx
 /pack-generate
 ```
 
-This scans your repos for `README.md`, `CLAUDE.md`, `go.mod`, `package.json` and builds a memory pack automatically.
+This performs deterministic discovery across your repos — including read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints — then builds a structured memory pack automatically.
 
 ### 2. Let the agent learn organically
 
@@ -138,7 +138,7 @@ pi starts → detect pack for cwd → load context
                                       │
 user sends prompt ────────────────────┤
                                       │
-  1. Search pack for relevant memories (qmd semantic or grep)
+  1. Search pack for relevant memories (qmd when available, grep fallback otherwise)
   2. Build prioritized context (manifest → context → search → actions → decisions → runbooks)
   3. Inject into system prompt (16K char budget)
                                       │
@@ -198,9 +198,14 @@ use memctx_search to find information about deploy
 
 Modes: `keyword` (fast), `semantic` (~2s), `deep` (~10s).
 
-Install [qmd](https://github.com/tobi/qmd) for semantic search: `npm install -g @tobilu/qmd`
+pi-memctx tries to use [qmd](https://github.com/tobi/qmd) automatically. Resolution order:
 
-Without qmd, search uses keyword grep (still works, just less smart).
+1. `MEMCTX_QMD_BIN`
+2. `qmd` on `PATH`
+3. the optional bundled `@tobilu/qmd` dependency at `node_modules/.bin/qmd`
+4. grep fallback
+
+Without qmd, both automatic context injection and `memctx_search` use keyword grep fallback.
 
 ### memctx_save
 
@@ -219,6 +224,8 @@ Types: `observation`, `decision`, `action`, `runbook`, `context`.
 | Command | What |
 |---|---|
 | `/pack` | Switch packs (picker or `/pack name`) |
+| `/pack-status` | Show active pack, qmd status, last retrieval, and strict-mode status |
+| `/memctx-strict` | Toggle stronger retrieval guidance (`/memctx-strict on|off|status`) |
 | `/pack-generate` | Generate pack from repo directory |
 
 ## Multiple packs
@@ -262,6 +269,7 @@ bash benchmark/run.sh
 - [Safety](docs/safety.md)
 - [Search](docs/search.md)
 - [Persistence](docs/persistence.md)
+- [Pack generation](docs/pack-generate.md)
 - [Development](docs/development.md)
 - [Publishing](docs/publishing.md)
 
