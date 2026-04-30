@@ -18,9 +18,10 @@ Releases are tag-driven. Pushing a tag like `v0.3.0` runs `.github/workflows/rel
 5. runs `npm pack --json`;
 6. generates a SHA-256 checksum for the tarball;
 7. publishes the tarball to npm when `NPM_TOKEN` is configured;
-8. creates or updates the GitHub Release and uploads the tarball plus checksum.
+8. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
+9. creates or updates the GitHub Release and uploads the tarball plus checksum.
 
-The publish step is idempotent: if the version already exists on npm, it skips publishing. If `NPM_TOKEN` is not configured, the workflow still creates/updates the GitHub Release and can be rerun after the secret is added.
+The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped. If `NPM_TOKEN` is not configured, the workflow still publishes the GitHub Packages mirror and creates/updates the GitHub Release; rerun it after adding the secret to publish to npmjs.com.
 
 ## Required secret
 
@@ -31,6 +32,29 @@ NPM_TOKEN
 ```
 
 The workflow also requests `id-token: write` so the project can migrate to npm Trusted Publishing later.
+
+## GitHub Packages mirror
+
+The release workflow also publishes a GitHub Packages mirror under the organization scope:
+
+```txt
+@weauratech/pi-memctx
+```
+
+The repository package name remains `pi-memctx` for npmjs.com. During release, the workflow extracts the generated npm tarball into a temporary directory, rewrites only the temporary `package.json` name to `@weauratech/pi-memctx`, and publishes that scoped package to `https://npm.pkg.github.com`.
+
+To install the GitHub Packages mirror, configure npm for the scope and authenticate with a GitHub token that can read packages:
+
+```bash
+npm config set @weauratech:registry https://npm.pkg.github.com
+pi install npm:@weauratech/pi-memctx
+```
+
+For most public users, npmjs.com remains the recommended registry:
+
+```bash
+pi install npm:pi-memctx
+```
 
 ## Before publishing a release
 

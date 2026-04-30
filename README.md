@@ -99,6 +99,8 @@ Or install directly from GitHub:
 pi install git:github.com/weauratech/pi-memctx
 ```
 
+A GitHub Packages mirror is also published as `@weauratech/pi-memctx` for users who configure the GitHub npm registry.
+
 ## Quick start
 
 ### 1. Generate a pack from your project
