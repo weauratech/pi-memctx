@@ -115,6 +115,11 @@ jobs:
           PACKAGE="@weauratech/pi-memctx"
           REGISTRY="https://npm.pkg.github.com"
 
+          cat > ~/.npmrc <<EOF
+          @weauratech:registry=$REGISTRY
+          //npm.pkg.github.com/:_authToken=$NODE_AUTH_TOKEN
+          EOF
+
           if npm view "$PACKAGE@$VERSION" version --registry="$REGISTRY" >/dev/null 2>&1; then
             echo "$PACKAGE@$VERSION is already published on GitHub Packages. Skipping publish."
             exit 0
@@ -134,7 +139,7 @@ jobs:
           NODE
 
           cd github-package/package
-          npm publish --registry="$REGISTRY" --access public
+          npm publish --registry="$REGISTRY"
 
       - name: Create or update GitHub Release
         env:
