@@ -32,7 +32,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - qmd probing now fails fast and reports probe errors in `/pack-status`.
 - Generated pack content redacts high-confidence secret-looking values before persistence.
-- CI installs omit optional qmd dependencies for stable core tests.
+- CI installs omit optional qmd dependencies and optional peer dependencies for stable core tests.
 
 ## [0.2.1] - 2026-04-30
 
