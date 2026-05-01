@@ -266,8 +266,10 @@ These slash commands are available inside Pi after the extension loads.
 
 | Command | Usage | What |
 |---|---|---|
+| `/memctx-profile` | `/memctx-profile auto\|low\|balanced\|full\|status` | Apply a zero-config behavior profile. Default is `auto`. |
+| `/memctx-config` | `/memctx-config status\|reset` | Inspect or reset persistent config in `~/.config/pi-memctx/config.json`. |
 | `/memctx-pack` | `/memctx-pack` or `/memctx-pack <name>` | List packs with a picker or switch directly. |
-| `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
+| `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, profile/config, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
 | `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. Defaults to `on`; project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
 | `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
 | `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching, retrieval expansion, autosave candidates, and pack generation. |
@@ -283,6 +285,8 @@ Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, 
 ### `/memctx-pack-status` example
 
 ```txt
+Profile: auto
+Config path: ~/.config/pi-memctx/config.json
 Active pack: opensource
 Pack path: ~/.pi/agent/memory-vault/packs/opensource
 Auto-switch: cwd
@@ -298,7 +302,7 @@ qmd source: local-dependency
 Strict mode: on
 LLM mode: assist
 LLM calls: 0
-Overlay: 📦 opensource · qmd:3 · retrieval:auto · save:suggest · strict:on · llm:assist
+Overlay: 📦 opensource · profile:auto · qmd:3 · retrieval:auto · save:auto · strict:on · llm:assist
 Last retrieval: qmd
 ```
 
@@ -318,6 +322,14 @@ With multiple packs, pi-memctx auto-detects the best one based on your working d
 cd ~/code/my-api       # → loads "my-api" pack
 cd ~/code/my-infra     # → loads "infra" pack
 cd ~/code              # → loads org-level pack
+```
+
+For most users, no setup is needed: `profile:auto` is applied by default. Switch profile when you want different trade-offs:
+
+```txt
+/memctx-profile low       # low latency/cost
+/memctx-profile balanced  # review memory candidates
+/memctx-profile full      # maximum retrieval/LLM usage
 ```
 
 Switch mid-session with `/memctx-pack`, or enable prompt-based switching:

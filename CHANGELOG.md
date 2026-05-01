@@ -10,18 +10,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added `/memctx-profile auto|low|balanced|full|status` and persistent config in `~/.config/pi-memctx/config.json`; default profile is `auto`.
+- Added `/memctx-config status|reset` for inspecting/resetting persistent config.
 - Added configurable retrieval policy via `/memctx-retrieval` and `MEMCTX_RETRIEVAL=auto|fast|balanced|deep|strict`; default is `auto`.
 - Added LLM-assisted query expansion for balanced/deep/strict retrieval policies.
 - Added autosave memory candidates via `/memctx-autosave` and `MEMCTX_AUTOSAVE=off|suggest|confirm|auto`.
 - Added save candidate review queue via `/memctx-save-queue`.
 - Added `/memctx-doctor` for runtime and pack health diagnostics.
 - Added `/memctx-pack-enrich` for LLM-assisted enrichment of existing packs.
+- Added ask-first auto-bootstrap flow for creating a pack when no pack is found in a project directory.
 - Added LLM-structured session handoffs during compaction when LLM mode is enabled.
 - Added memory lookup hints after failed tool results.
 
 ### Changed
 
-- Footer/status overlay now includes retrieval policy and autosave mode in addition to pack, qmd/retrieval, strict mode, and LLM mode.
+- Footer/status overlay now includes profile, retrieval policy, and autosave mode in addition to pack, qmd/retrieval, strict mode, and LLM mode.
 - Strict mode now defaults to on for new installs and updates the footer/status overlay immediately when toggled.
 - Automatic retrieval can now attempt multiple generated queries depending on retrieval policy.
 - `retrieval:auto` is now latency-bounded with a default 1000ms budget and no longer escalates to full strict retrieval just because strict mode is enabled.

@@ -80,6 +80,9 @@ type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
 type LlmMode = "off" | "assist" | "first";
 type RetrievalPolicy = "auto" | "fast" | "balanced" | "deep" | "strict";
 type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
+type MemctxProfile = "low" | "balanced" | "auto" | "full" | "custom";
+type AutoBootstrapMode = "off" | "ask" | "on";
+type StartupDoctorMode = "off" | "light" | "full";
 type Confidence = "none" | "low" | "medium" | "high";
 
 type PackMatch = {
@@ -142,6 +145,26 @@ type MemoryCandidate = {
 	pack: string;
 };
 
+type MemctxConfig = {
+	profile: MemctxProfile;
+	baseProfile?: Exclude<MemctxProfile, "custom">;
+	strict: boolean;
+	retrieval: RetrievalPolicy;
+	retrievalLatencyBudgetMs: number;
+	autosave: AutosaveMode;
+	autosaveQueueLowConfidence: boolean;
+	llm: LlmMode;
+	autoSwitch: AutoSwitchMode;
+	autoBootstrap: AutoBootstrapMode;
+	startupDoctor: StartupDoctorMode;
+	toolFailureHints: boolean;
+};
+
+let currentProfile: MemctxProfile = "auto";
+let baseProfile: Exclude<MemctxProfile, "custom"> = "auto";
+let autoBootstrapMode: AutoBootstrapMode = "ask";
+let startupDoctorMode: StartupDoctorMode = "light";
+let toolFailureHints = true;
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
@@ -192,6 +215,84 @@ function parseRetrievalPolicy(value: string | undefined): RetrievalPolicy {
 function parseAutosaveMode(value: string | undefined): AutosaveMode {
 	const normalized = (value ?? "suggest").toLowerCase();
 	return ["off", "suggest", "confirm", "auto"].includes(normalized) ? normalized as AutosaveMode : "suggest";
+}
+
+function parseAutoBootstrapMode(value: string | undefined): AutoBootstrapMode {
+	const normalized = (value ?? "ask").toLowerCase();
+	return ["off", "ask", "on"].includes(normalized) ? normalized as AutoBootstrapMode : "ask";
+}
+
+function parseStartupDoctorMode(value: string | undefined): StartupDoctorMode {
+	const normalized = (value ?? "light").toLowerCase();
+	return ["off", "light", "full"].includes(normalized) ? normalized as StartupDoctorMode : "light";
+}
+
+function memctxConfigPath(): string {
+	if (process.env.MEMCTX_CONFIG_PATH) return process.env.MEMCTX_CONFIG_PATH;
+	return path.join(process.env.HOME ?? process.env.USERPROFILE ?? ".", ".config", "pi-memctx", "config.json");
+}
+
+function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
+	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
+		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false },
+		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true },
+		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true },
+		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true },
+	};
+	return { ...base[profile], baseProfile: profile };
+}
+
+function readMemctxConfig(): MemctxConfig {
+	const raw = readFileSafe(memctxConfigPath());
+	const fallback = profileDefaults("auto");
+	if (!raw) return fallback;
+	try {
+		const parsed = JSON.parse(raw) as Partial<MemctxConfig>;
+		const profile = (["low", "balanced", "auto", "full", "custom"].includes(String(parsed.profile)) ? parsed.profile : "auto") as MemctxProfile;
+		const base = (profile === "custom" && ["low", "balanced", "auto", "full"].includes(String(parsed.baseProfile)) ? parsed.baseProfile : profile === "custom" ? "auto" : profile) as Exclude<MemctxProfile, "custom">;
+		return { ...profileDefaults(base), ...parsed, profile, baseProfile: base };
+	} catch {
+		return fallback;
+	}
+}
+
+function writeMemctxConfig(config: MemctxConfig) {
+	const configPath = memctxConfigPath();
+	fs.mkdirSync(path.dirname(configPath), { recursive: true });
+	fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
+}
+
+function envOrConfig<T>(envValue: string | undefined, parsed: T, fallback: T): T {
+	return envValue === undefined ? fallback : parsed;
+}
+
+function applyMemctxConfig(config: MemctxConfig) {
+	currentProfile = config.profile;
+	baseProfile = config.baseProfile ?? (config.profile === "custom" ? "auto" : config.profile);
+	strictMode = envOrConfig(process.env.MEMCTX_STRICT, parseStrictModeEnv(process.env.MEMCTX_STRICT), config.strict);
+	retrievalPolicy = envOrConfig(process.env.MEMCTX_RETRIEVAL, parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL), config.retrieval);
+	retrievalLatencyBudgetMs = envOrConfig(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000), config.retrievalLatencyBudgetMs);
+	autosaveMode = envOrConfig(process.env.MEMCTX_AUTOSAVE, parseAutosaveMode(process.env.MEMCTX_AUTOSAVE), config.autosave);
+	autosaveQueueLowConfidence = envOrConfig(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE, parseBooleanDefaultFalse(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE), config.autosaveQueueLowConfidence);
+	llmMode = envOrConfig(process.env.MEMCTX_LLM_MODE, parseLlmMode(process.env.MEMCTX_LLM_MODE), config.llm);
+	autoSwitchMode = envOrConfig(process.env.MEMCTX_AUTO_SWITCH, parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH), config.autoSwitch);
+	autoBootstrapMode = envOrConfig(process.env.MEMCTX_AUTO_BOOTSTRAP, parseAutoBootstrapMode(process.env.MEMCTX_AUTO_BOOTSTRAP), config.autoBootstrap);
+	startupDoctorMode = envOrConfig(process.env.MEMCTX_STARTUP_DOCTOR, parseStartupDoctorMode(process.env.MEMCTX_STARTUP_DOCTOR), config.startupDoctor);
+	toolFailureHints = envOrConfig(process.env.MEMCTX_TOOL_FAILURE_HINTS, parseBooleanDefaultFalse(process.env.MEMCTX_TOOL_FAILURE_HINTS), config.toolFailureHints);
+	llmStats.mode = llmMode;
+}
+
+function currentMemctxConfig(profile: MemctxProfile = currentProfile): MemctxConfig {
+	return { profile, baseProfile, strict: strictMode, retrieval: retrievalPolicy, retrievalLatencyBudgetMs, autosave: autosaveMode, autosaveQueueLowConfidence, llm: llmMode, autoSwitch: autoSwitchMode, autoBootstrap: autoBootstrapMode, startupDoctor: startupDoctorMode, toolFailureHints };
+}
+
+function persistCurrentConfig(profile: MemctxProfile = currentProfile) {
+	writeMemctxConfig(currentMemctxConfig(profile));
+}
+
+function markCustomAndPersist() {
+	currentProfile = "custom";
+	persistCurrentConfig("custom");
 }
 
 function confidenceForScore(score: number): Confidence {
@@ -635,7 +736,7 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
-	return `📦 ${activePack || "none"} · ${retrieval} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+	return `📦 ${activePack || "none"} · profile:${currentProfile} · ${retrieval} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
 function isNoResultText(text: string): boolean {
@@ -1150,13 +1251,29 @@ function enqueueMemoryCandidate(candidate: MemoryCandidate) {
 	if (!duplicate) writeSaveQueue([...queue, candidate]);
 }
 
+function findSimilarNote(candidate: MemoryCandidate): string | null {
+	if (!activePackPath) return null;
+	const terms = candidate.title.toLowerCase().split(/\s+/).filter((term) => term.length > 3).slice(0, 6);
+	if (terms.length === 0) return null;
+	const dirs = NOTE_TYPE_DIRS[candidate.type].map((dir) => path.join(activePackPath, dir)).filter((dir) => fs.existsSync(dir));
+	for (const dir of dirs) {
+		for (const file of scanPackFiles(dir).slice(0, 40)) {
+			const content = readFileSafe(file)?.toLowerCase() ?? "";
+			const score = terms.filter((term) => content.includes(term)).length;
+			if (score >= Math.min(3, terms.length)) return file;
+		}
+	}
+	return null;
+}
+
 function saveMemoryCandidate(candidate: MemoryCandidate): { rel: string; action: "created" | "updated" } {
 	if (!activePackPath || !activePack) throw new Error("No active memory pack");
 	if (sensitivePatternHit(candidate.title, candidate.content)) throw new Error("Candidate appears to contain secrets");
 	const noteDir = resolveNoteDir(activePackPath, candidate.type);
 	const fileSlug = slugify(candidate.title);
+	const similarPath = findSimilarNote(candidate);
 	const fileName = candidate.type === "action" ? `${todayStr()}-${fileSlug}.md` : `${fileSlug}.md`;
-	const filePath = path.join(noteDir, fileName);
+	const filePath = similarPath ?? path.join(noteDir, fileName);
 	const body = `${candidate.content}\n\n## Evidence\n\n- Confidence: ${Math.round(candidate.confidence * 100)}%\n- Reason: ${candidate.reason}`;
 	if (fs.existsSync(filePath)) {
 		const existing = readFileSafe(filePath) ?? "";
@@ -2112,6 +2229,39 @@ ${rows.join("\n")}
 	return { packPath, filesCreated };
 }
 
+function looksLikeProjectDirectory(cwd: string): boolean {
+	const basename = path.basename(cwd);
+	if (!cwd || cwd === path.parse(cwd).root) return false;
+	if (["", "~", "home", "users", "downloads", "desktop", "documents"].includes(basename.toLowerCase())) return false;
+	const signals = [".git", "package.json", "go.mod", "README.md", "pyproject.toml", "Cargo.toml", "docker-compose.yml", "pnpm-workspace.yaml"];
+	return signals.some((signal) => fs.existsSync(path.join(cwd, signal)));
+}
+
+async function maybeBootstrapPack(ctx: ExtensionContext, packsDir: string): Promise<boolean> {
+	if (autoBootstrapMode === "off" || !looksLikeProjectDirectory(ctx.cwd)) return false;
+	if (!ctx.hasUI) return false;
+	const slug = path.basename(ctx.cwd).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "project";
+	const message = [
+		`No memory pack was found for this project directory:`,
+		ctx.cwd,
+		"",
+		`Create and map a new pack named \"${slug}\" now?`,
+		"Choose No if you prefer to run /memctx-pack-generate later.",
+	].join("\n");
+	const confirmed = autoBootstrapMode === "on" ? await ctx.ui.confirm("Create memory pack?", message) : await ctx.ui.confirm("Create memory pack?", message);
+	if (!confirmed) {
+		ctx.ui.notify("memctx: Pack bootstrap skipped. Run /memctx-pack-generate when you want to create one.", "info");
+		return false;
+	}
+	fs.mkdirSync(packsDir, { recursive: true });
+	const { packPath, filesCreated } = generatePackFromDirectory(ctx.cwd, slug, packsDir);
+	activePack = slug;
+	activePackPath = packPath;
+	qmdCollection = `memctx-${slug}`;
+	ctx.ui.notify(`memctx: Created pack \"${slug}\" with ${filesCreated.length} files.`, "info");
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // Test hooks (override state for testing)
 // ---------------------------------------------------------------------------
@@ -2142,13 +2292,7 @@ export function _resetState() {
 	qmdBin = "";
 	qmdStatus = { available: false, source: "missing" };
 	qmdCollection = "";
-	strictMode = parseStrictModeEnv(process.env.MEMCTX_STRICT);
-	autoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
-	llmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
-	retrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
-	autosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
-	retrievalLatencyBudgetMs = parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000);
-	autosaveQueueLowConfidence = parseBooleanDefaultFalse(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE);
+	applyMemctxConfig(profileDefaults("auto"));
 	lastRetrieval = null;
 	lastPackSelection = null;
 	lastPackSwitch = null;
@@ -2163,17 +2307,22 @@ export function _resetState() {
 export default function (pi: ExtensionAPI) {
 	// --- session_start: detect vault, active pack, qmd ---
 	pi.on("session_start", async (_event, ctx) => {
-		// Resolve packs directory
-		const packsDir = resolvePacksDir(ctx.cwd);
+		applyMemctxConfig(readMemctxConfig());
+		let packsDir = resolvePacksDir(ctx.cwd);
 
 		if (!packsDir) {
-			if (ctx.hasUI) {
-				ctx.ui.notify(
-					"memctx: No packs found. Set MEMCTX_PACKS_PATH, create .pi/memory-vault/packs/, or use ~/.pi/agent/memory-vault/packs/",
-					"info",
-				);
+			const bootstrapped = await maybeBootstrapPack(ctx, DEFAULT_GLOBAL_PACKS_DIR);
+			if (bootstrapped) {
+				packsDir = DEFAULT_GLOBAL_PACKS_DIR;
+			} else {
+				if (ctx.hasUI) {
+					ctx.ui.notify(
+						"memctx: No packs found. Run /memctx-pack-generate to create one, or set MEMCTX_PACKS_PATH.",
+						"info",
+					);
+				}
+				return;
 			}
-			return;
 		}
 
 		vaultRoot = path.dirname(packsDir);
@@ -2204,7 +2353,15 @@ export default function (pi: ExtensionAPI) {
 				? `qmd ✓ (${qmdStatus.source})`
 				: "qmd ✗ (grep fallback)";
 			const selection = lastPackSelection?.pack === activePack ? ` ${lastPackSelection.confidence} cwd match` : "";
-			ctx.ui.notify(`memctx: Pack "${activePack}" loaded.${selection} ${qmdLabel}`, "info");
+			ctx.ui.notify(`memctx: Pack "${activePack}" loaded.${selection} ${qmdLabel} profile:${currentProfile}`, "info");
+			if (startupDoctorMode !== "off") {
+				const queueCount = readSaveQueue().length;
+				const warnings = [
+					!qmdAvailable ? "qmd unavailable; using grep fallback" : "",
+					queueCount > 0 ? `${queueCount} memory candidate${queueCount === 1 ? "" : "s"} pending review` : "",
+				].filter(Boolean);
+				if (warnings.length > 0) ctx.ui.notify(`memctx doctor: ${warnings.join("; ")}`, "warning");
+			}
 			ctx.ui.setStatus("memctx", buildStatusText());
 		}
 	});
@@ -2388,6 +2545,8 @@ export default function (pi: ExtensionAPI) {
 				? [`Last switch: ${lastPackSwitch.from || "<none>"} → ${lastPackSwitch.to}`, `  reason: ${lastPackSwitch.reason}`, `  at: ${lastPackSwitch.timestamp}`]
 				: ["Last switch: none"];
 			const lines = [
+				`Profile: ${currentProfile}${currentProfile === "custom" ? ` (base ${baseProfile})` : ""}`,
+				`Config path: ${memctxConfigPath()}`,
 				`Active pack: ${activePack || "<none>"}`,
 				`Pack path: ${activePackPath || "<none>"}`,
 				`Packs dir: ${packsDir || "<none>"}`,
@@ -2424,19 +2583,70 @@ export default function (pi: ExtensionAPI) {
 		description: "Deprecated alias for /memctx-pack-status.",
 	});
 
+	// --- /memctx-profile command: apply zero-config behavior profiles ---
+	pi.registerCommand("memctx-profile", {
+		description: "Apply a memory behavior profile. Usage: /memctx-profile [auto|low|balanced|full|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["low", "balanced", "auto", "full"].includes(target)) {
+				const config = profileDefaults(target as Exclude<MemctxProfile, "custom">);
+				applyMemctxConfig(config);
+				writeMemctxConfig(config);
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-profile [auto|low|balanced|full|status]", "error");
+				return;
+			}
+			ctx.ui.notify([
+				`memctx profile: ${currentProfile}`,
+				`strict: ${strictMode ? "on" : "off"}`,
+				`retrieval: ${retrievalPolicy} (${retrievalLatencyBudgetMs}ms)`,
+				`autosave: ${autosaveMode}`,
+				`llm: ${llmMode}`,
+				`auto-switch: ${autoSwitchMode}`,
+				`auto-bootstrap: ${autoBootstrapMode}`,
+			].join("\n"), "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
+		},
+	});
+
+	// --- /memctx-config command: inspect/reset persistent config ---
+	pi.registerCommand("memctx-config", {
+		description: "Show or reset persistent memctx config. Usage: /memctx-config [status|reset]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (target === "reset") {
+				const config = profileDefaults("auto");
+				applyMemctxConfig(config);
+				writeMemctxConfig(config);
+				ctx.ui.notify("memctx: Config reset to profile:auto.", "info");
+				ctx.ui.setStatus("memctx", buildStatusText());
+				return;
+			}
+			if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-config [status|reset]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx config: ${memctxConfigPath()}\n${JSON.stringify(currentMemctxConfig(), null, 2)}`, "info");
+		},
+	});
+
 	// --- /memctx-strict command: toggle strict memory gate ---
 	pi.registerCommand("memctx-strict", {
 		description: "Toggle strict memory retrieval guidance. Usage: /memctx-strict [on|off|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
+			let changed = false;
 			if (["on", "true", "1", "yes"].includes(target)) {
 				strictMode = true;
+				changed = true;
 			} else if (["off", "false", "0", "no"].includes(target)) {
 				strictMode = false;
+				changed = true;
 			} else if (target && target !== "status") {
 				ctx.ui.notify("memctx: Usage: /memctx-strict [on|off|status]", "error");
 				return;
 			}
+			if (changed) markCustomAndPersist();
 			ctx.ui.notify(`memctx: Strict mode ${strictMode ? "on" : "off"}.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
@@ -2447,12 +2657,15 @@ export default function (pi: ExtensionAPI) {
 		description: "Configure automatic pack switching. Usage: /memctx-auto-switch [off|cwd|prompt|all|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
+			let changed = false;
 			if (["off", "cwd", "prompt", "all"].includes(target)) {
 				autoSwitchMode = target as AutoSwitchMode;
+				changed = true;
 			} else if (target && target !== "status") {
 				ctx.ui.notify("memctx: Usage: /memctx-auto-switch [off|cwd|prompt|all|status]", "error");
 				return;
 			}
+			if (changed) markCustomAndPersist();
 			ctx.ui.notify(`memctx: Auto-switch ${autoSwitchMode}.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
@@ -2463,13 +2676,16 @@ export default function (pi: ExtensionAPI) {
 		description: "Configure LLM assistance. Usage: /memctx-llm [off|assist|first|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
+			let changed = false;
 			if (["off", "assist", "first"].includes(target)) {
 				llmMode = target as LlmMode;
 				llmStats.mode = llmMode;
+				changed = true;
 			} else if (target && target !== "status") {
 				ctx.ui.notify("memctx: Usage: /memctx-llm [off|assist|first|status]", "error");
 				return;
 			}
+			if (changed) markCustomAndPersist();
 			ctx.ui.notify(`memctx: LLM mode ${llmMode}. Calls this session: ${llmStats.callsThisSession}. Last: ${llmStats.lastUseCase ?? "none"}.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
@@ -2480,12 +2696,15 @@ export default function (pi: ExtensionAPI) {
 		description: "Configure automatic memory retrieval. Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
+			let changed = false;
 			if (["auto", "fast", "balanced", "deep", "strict"].includes(target)) {
 				retrievalPolicy = target as RetrievalPolicy;
+				changed = true;
 			} else if (target && target !== "status") {
 				ctx.ui.notify("memctx: Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]", "error");
 				return;
 			}
+			if (changed) markCustomAndPersist();
 			ctx.ui.notify(`memctx: Retrieval policy ${retrievalPolicy}.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
@@ -2496,12 +2715,15 @@ export default function (pi: ExtensionAPI) {
 		description: "Configure memory save suggestions. Usage: /memctx-autosave [off|suggest|confirm|auto|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
+			let changed = false;
 			if (["off", "suggest", "confirm", "auto"].includes(target)) {
 				autosaveMode = target as AutosaveMode;
+				changed = true;
 			} else if (target && target !== "status") {
 				ctx.ui.notify("memctx: Usage: /memctx-autosave [off|suggest|confirm|auto|status]", "error");
 				return;
 			}
+			if (changed) markCustomAndPersist();
 			ctx.ui.notify(`memctx: Autosave ${autosaveMode}. Save queue: ${readSaveQueue().length} pending.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
