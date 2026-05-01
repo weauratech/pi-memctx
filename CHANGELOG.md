@@ -24,10 +24,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Footer/status overlay now includes retrieval policy and autosave mode in addition to pack, qmd/retrieval, strict mode, and LLM mode.
 - Strict mode now defaults to on for new installs and updates the footer/status overlay immediately when toggled.
 - Automatic retrieval can now attempt multiple generated queries depending on retrieval policy.
+- `retrieval:auto` is now latency-bounded with a default 1000ms budget and no longer escalates to full strict retrieval just because strict mode is enabled.
+- `autosave:auto` now saves high-confidence candidates automatically without queue approval and does not queue low-confidence candidates unless explicitly configured.
 - Context pack ordering now prioritizes overview and architecture notes before recency-only context.
 
 ### Fixed
 
+- Suppressed false tool-failure memory hints when qmd reports `No results found`.
 - Consolidated recent LLM, qmd, GitHub Packages, and memctx-command features into the next minor release line.
 
 ## [0.3.0] - 2026-04-30

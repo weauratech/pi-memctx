@@ -73,14 +73,16 @@ Environment equivalents:
 MEMCTX_AUTO_SWITCH=off|cwd|prompt|all
 MEMCTX_LLM_MODE=off|assist|first
 MEMCTX_RETRIEVAL=auto|fast|balanced|deep|strict
+MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS=1000
 MEMCTX_AUTOSAVE=off|suggest|confirm|auto
+MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=false
 ```
 
 Use stronger retrieval and memory capture when desired:
 
 ```txt
 /memctx-retrieval strict
-/memctx-autosave suggest
+/memctx-autosave auto
 /memctx-save-queue
 /memctx-doctor
 ```

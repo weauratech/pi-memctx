@@ -14,11 +14,13 @@
 /memctx-retrieval auto|fast|balanced|deep|strict|status
 ```
 
-- `auto`: default; chooses a safe policy from strict/LLM/qmd state.
+- `auto`: default; starts with fast keyword retrieval and only attempts bounded expansion when needed.
 - `fast`: one keyword query.
 - `balanced`: keyword plus LLM-expanded queries when available.
 - `deep`: multi-query retrieval with deeper qmd mode.
 - `strict`: always attempts expanded retrieval and reports attempted queries/cross-pack hints.
+
+`auto` uses `MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS` with a default of `1000`, so strict mode no longer turns `auto` into full strict retrieval. Use `/memctx-retrieval strict` when depth matters more than latency.
 
 qmd is resolved from `MEMCTX_QMD_BIN`, `PATH`, or the optional bundled `@tobilu/qmd` dependency. Without qmd, pi-memctx falls back to local grep-style Markdown search.
 

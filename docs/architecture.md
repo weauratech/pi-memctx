@@ -14,6 +14,7 @@ session_start
 before_agent_start
   -> optionally switch packs from prompt intent
   -> apply retrieval policy (auto/fast/balanced/deep/strict)
+  -> keep auto retrieval latency-bounded (default 1000ms)
   -> optionally expand queries with LLM
   -> search active pack for prompt-relevant context with qmd when available
   -> fall back to grep-style Markdown search when qmd is unavailable or returns no result

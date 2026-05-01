@@ -124,6 +124,9 @@ type RetrievalStatus = {
 	policy: RetrievalPolicy;
 	resultCount: number;
 	crossPackHits: string[];
+	durationMs: number;
+	budgetMs: number;
+	timedOut: boolean;
 	timestamp: string;
 };
 
@@ -145,6 +148,8 @@ let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO
 let llmMode: LlmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 let retrievalPolicy: RetrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
 let autosaveMode: AutosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
+let retrievalLatencyBudgetMs = parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000);
+let autosaveQueueLowConfidence = parseBooleanDefaultFalse(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE);
 let lastPackSelection: PackMatch | null = null;
 let lastPackSwitch: PackSwitch | null = null;
 let llmStats: LlmStats = {
@@ -158,6 +163,15 @@ function parseStrictModeEnv(value: string | undefined): boolean {
 	const normalized = (value ?? "on").toLowerCase();
 	if (["0", "false", "no", "off"].includes(normalized)) return false;
 	return true;
+}
+
+function parseBooleanDefaultFalse(value: string | undefined): boolean {
+	return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
+}
+
+function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
+	const parsed = Number.parseInt(value ?? "", 10);
+	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function parseAutoSwitchMode(value: string | undefined): AutoSwitchMode {
@@ -461,7 +475,8 @@ export async function qmdSearch(
 				? ["vsearch", query, "-n", String(limit), "-c", collection]
 				: ["search", query, "-n", String(limit), "-c", collection];
 	const result = await qmdExec(args, mode === "deep" ? 15000 : 5000);
-	return result.ok ? result.stdout : "";
+	if (!result.ok || isNoResultText(result.stdout)) return "";
+	return result.stdout;
 }
 
 export async function qmdEmbed(collection: string, packPath: string): Promise<boolean> {
@@ -619,8 +634,19 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 }
 
 function buildStatusText(): string {
-	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}` : "idle";
+	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
 	return `📦 ${activePack || "none"} · ${retrieval} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+}
+
+function isNoResultText(text: string): boolean {
+	const normalized = text.trim().toLowerCase().replace(/[.!]+$/, "");
+	return normalized === "no results found" || normalized === "no results";
+}
+
+function countQmdResults(text: string): number {
+	if (!text.trim() || isNoResultText(text)) return 0;
+	const uriMatches = text.match(/^qmd:\/\//gm)?.length ?? 0;
+	return uriMatches > 0 ? uriMatches : text.split("\n").filter((line) => line.trim() && !isNoResultText(line)).length;
 }
 
 export async function searchPackMemory(
@@ -634,8 +660,9 @@ export async function searchPackMemory(
 		if (!qmdResults.trim() && mode !== "keyword") {
 			qmdResults = await qmdSearch(query, qmdCollection, limit, "keyword");
 		}
-		if (qmdResults.trim()) {
-			return { text: qmdResults, mode: "qmd", matchCount: qmdResults.split("\n").filter((line) => line.trim()).length };
+		const qmdCount = countQmdResults(qmdResults);
+		if (qmdCount > 0) {
+			return { text: qmdResults, mode: "qmd", matchCount: qmdCount };
 		}
 	}
 
@@ -649,10 +676,20 @@ export async function searchPackMemory(
 
 type QueryExpansion = { queries?: string[] };
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: T): Promise<{ value: T; timedOut: boolean }> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<T>((resolve) => {
+		timer = setTimeout(() => resolve(fallback), timeoutMs);
+	});
+	const value = await Promise.race([promise, timeout]);
+	if (timer) clearTimeout(timer);
+	return { value, timedOut: value === fallback };
+}
+
 async function buildRetrievalQueries(prompt: string, ctx: ExtensionContext, policy: RetrievalPolicy): Promise<string[]> {
 	const sanitized = prompt.replace(/[^\w\s.,?!/-]/g, "").slice(0, 300).trim();
 	if (!sanitized) return [];
-	const effective = policy === "auto" ? (strictMode ? "strict" : llmMode === "off" ? "fast" : "balanced") : policy;
+	const effective = policy === "auto" ? "balanced" : policy;
 	if (effective === "fast") return [sanitized];
 	if (llmMode === "off" || !ctx.model) return [sanitized];
 	const decision = await completeJsonWithLlm<QueryExpansion>(ctx, "retrieval-query-expansion", [
@@ -686,23 +723,50 @@ function crossPackHitsForQuery(query: string, limit = 5): string[] {
 	return hits;
 }
 
-async function retrieveForPrompt(prompt: string, ctx: ExtensionContext): Promise<{ text: string; mode: RetrievalStatus["mode"]; count: number; query: string; queries: string[]; crossPackHits: string[] }> {
-	const queries = await buildRetrievalQueries(prompt, ctx, retrievalPolicy);
-	const effective = retrievalPolicy === "auto" ? (strictMode ? "strict" : llmMode === "off" ? "fast" : "balanced") : retrievalPolicy;
-	const mode: SearchMode = effective === "deep" || effective === "strict" ? "deep" : "keyword";
+async function retrieveForPrompt(prompt: string, ctx: ExtensionContext): Promise<{ text: string; mode: RetrievalStatus["mode"]; count: number; query: string; queries: string[]; crossPackHits: string[]; durationMs: number; budgetMs: number; timedOut: boolean }> {
+	const start = Date.now();
+	const sanitized = prompt.replace(/[^\w\s.,?!/-]/g, "").slice(0, 300).trim();
+	if (!sanitized) return { text: "", mode: "none", count: 0, query: "", queries: [], crossPackHits: [], durationMs: 0, budgetMs: retrievalLatencyBudgetMs, timedOut: false };
+
 	const parts: string[] = [];
 	let finalMode: RetrievalStatus["mode"] = "none";
 	let count = 0;
-	for (const query of queries) {
-		const result = await searchPackMemory(activePackPath, query, effective === "fast" ? 3 : 5, mode);
-		if (result.matchCount > 0) {
-			parts.push(`### Query: ${query}\n${result.text}`);
-			finalMode = result.mode;
-			count += result.matchCount;
+	let queries = [sanitized];
+	let timedOut = false;
+
+	const first = await searchPackMemory(activePackPath, sanitized, 3, "keyword");
+	if (first.matchCount > 0) {
+		parts.push(`### Query: ${sanitized}\n${first.text}`);
+		finalMode = first.mode;
+		count += first.matchCount;
+	}
+
+	if (count === 0 && retrievalPolicy !== "fast") {
+		const remainingBudget = Math.max(1, retrievalLatencyBudgetMs - (Date.now() - start));
+		const shouldExpand = retrievalPolicy !== "auto" || (llmMode !== "off" && !!ctx.model);
+		if (shouldExpand && remainingBudget > 50) {
+			const expanded = await withTimeout(buildRetrievalQueries(prompt, ctx, retrievalPolicy), remainingBudget, [sanitized]);
+			timedOut = expanded.timedOut;
+			queries = expanded.value;
+		}
+		const effective = retrievalPolicy === "auto" ? "balanced" : retrievalPolicy;
+		const mode: SearchMode = effective === "deep" || effective === "strict" ? "deep" : "keyword";
+		for (const query of queries.filter((q) => q !== sanitized)) {
+			if (retrievalPolicy === "auto" && Date.now() - start > retrievalLatencyBudgetMs) {
+				timedOut = true;
+				break;
+			}
+			const result = await searchPackMemory(activePackPath, query, 5, mode);
+			if (result.matchCount > 0) {
+				parts.push(`### Query: ${query}\n${result.text}`);
+				finalMode = result.mode;
+				count += result.matchCount;
+			}
 		}
 	}
-	const crossPackHits = count === 0 && queries[0] ? crossPackHitsForQuery(queries[0]) : [];
-	return { text: parts.join("\n\n"), mode: finalMode, count, query: queries[0] ?? "", queries, crossPackHits };
+
+	const crossPackHits = count === 0 && sanitized ? crossPackHitsForQuery(sanitized) : [];
+	return { text: parts.join("\n\n"), mode: finalMode, count, query: queries[0] ?? "", queries, crossPackHits, durationMs: Date.now() - start, budgetMs: retrievalLatencyBudgetMs, timedOut };
 }
 
 /**
@@ -2083,6 +2147,8 @@ export function _resetState() {
 	llmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 	retrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
 	autosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
+	retrievalLatencyBudgetMs = parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000);
+	autosaveQueueLowConfidence = parseBooleanDefaultFalse(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE);
 	lastRetrieval = null;
 	lastPackSelection = null;
 	lastPackSwitch = null;
@@ -2157,6 +2223,9 @@ export default function (pi: ExtensionAPI) {
 		let retrievalQuery = "";
 		let retrievalQueries: string[] = [];
 		let crossPackHits: string[] = [];
+		let retrievalDurationMs = 0;
+		let retrievalBudgetMs = retrievalLatencyBudgetMs;
+		let retrievalTimedOut = false;
 
 		if (event.prompt?.trim()) {
 			const retrieval = await retrieveForPrompt(event.prompt, ctx);
@@ -2166,6 +2235,9 @@ export default function (pi: ExtensionAPI) {
 			retrievalQuery = retrieval.query;
 			retrievalQueries = retrieval.queries;
 			crossPackHits = retrieval.crossPackHits;
+			retrievalDurationMs = retrieval.durationMs;
+			retrievalBudgetMs = retrieval.budgetMs;
+			retrievalTimedOut = retrieval.timedOut;
 		}
 
 		lastRetrieval = {
@@ -2176,6 +2248,9 @@ export default function (pi: ExtensionAPI) {
 			policy: retrievalPolicy,
 			resultCount,
 			crossPackHits,
+			durationMs: retrievalDurationMs,
+			budgetMs: retrievalBudgetMs,
+			timedOut: retrievalTimedOut,
 			timestamp: nowTimestamp(),
 		};
 
@@ -2298,6 +2373,7 @@ export default function (pi: ExtensionAPI) {
 					`  query: ${lastRetrieval.query || "<none>"}`,
 					`  queries: ${lastRetrieval.queries.join(" | ") || "<none>"}`,
 					`  results: ${lastRetrieval.resultCount}`,
+					`  duration: ${lastRetrieval.durationMs}ms / ${lastRetrieval.budgetMs}ms${lastRetrieval.timedOut ? " (budget reached)" : ""}`,
 					`  cross-pack hits: ${lastRetrieval.crossPackHits.join(", ") || "<none>"}`,
 					`  at: ${lastRetrieval.timestamp}`,
 				]
@@ -2318,7 +2394,9 @@ export default function (pi: ExtensionAPI) {
 				`Pack files: ${packFileCount} markdown files`,
 				`Auto-switch: ${autoSwitchMode}`,
 				`Retrieval policy: ${retrievalPolicy}`,
+				`Retrieval budget: ${retrievalLatencyBudgetMs}ms`,
 				`Autosave: ${autosaveMode}`,
+				`Autosave low-confidence queue: ${autosaveQueueLowConfidence ? "on" : "off"}`,
 				`Save queue: ${readSaveQueue().length} pending`,
 				...selection,
 				...switchLines,
@@ -2905,7 +2983,7 @@ export default function (pi: ExtensionAPI) {
 		const text = JSON.stringify((event as any).content ?? "").slice(0, 500);
 		if (!text.trim()) return;
 		const result = await searchPackMemory(activePackPath, text, 2, "keyword");
-		if (result.matchCount > 0 && ctx.hasUI) {
+		if (result.matchCount > 0 && !isNoResultText(result.text) && ctx.hasUI) {
 			ctx.ui.setWidget("memctx-tool-failure", [
 				"\x1b[33m💡 memctx: Found memory that may help with the failed tool call.\x1b[0m",
 				truncate(result.text.replace(/\n+/g, " "), 300),
@@ -2976,13 +3054,18 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!candidate || sensitivePatternHit(candidate.title, candidate.content)) return;
 
-		if (autosaveMode === "auto" && candidate.confidence >= 0.85) {
-			try {
-				const saved = saveMemoryCandidate(candidate);
-				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-				if (ctx.hasUI) ctx.ui.notify(`memctx: Autosaved ${candidate.type}: ${saved.rel}`, "info");
-			} catch {
+		if (autosaveMode === "auto") {
+			if (candidate.confidence >= 0.85) {
+				try {
+					const saved = saveMemoryCandidate(candidate);
+					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+					if (ctx.hasUI) ctx.ui.notify(`memctx: Autosaved ${candidate.type}: ${saved.rel}`, "info");
+				} catch {
+					enqueueMemoryCandidate(candidate);
+				}
+			} else if (autosaveQueueLowConfidence) {
 				enqueueMemoryCandidate(candidate);
+				if (ctx.hasUI) ctx.ui.notify(`memctx: Queued low-confidence autosave candidate: ${candidate.title}`, "info");
 			}
 			return;
 		}
