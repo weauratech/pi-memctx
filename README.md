@@ -268,7 +268,7 @@ These slash commands are available inside Pi after the extension loads.
 |---|---|---|
 | `/memctx-pack` | `/memctx-pack` or `/memctx-pack <name>` | List packs with a picker or switch directly. |
 | `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
-| `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. In strict mode, project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
+| `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. Defaults to `on`; project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
 | `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
 | `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching, retrieval expansion, autosave candidates, and pack generation. |
 | `/memctx-retrieval` | `/memctx-retrieval auto\|fast\|balanced\|deep\|strict\|status` | Configure automatic retrieval depth. `auto` is the default. |
@@ -293,10 +293,10 @@ Selection: high (112)
 Last switch: none
 qmd: available
 qmd source: local-dependency
-Strict mode: off
+Strict mode: on
 LLM mode: assist
 LLM calls: 0
-Overlay: 📦 opensource · qmd:3 · retrieval:auto · save:suggest · strict:off · llm:assist
+Overlay: 📦 opensource · qmd:3 · retrieval:auto · save:suggest · strict:on · llm:assist
 Last retrieval: qmd
 ```
 
