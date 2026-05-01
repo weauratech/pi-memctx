@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+
+## [0.5.5] - 2026-05-01
+
 ### Fixed
 
 - Fixed the README stars badge by using a dynamic GitHub API count badge.
+<!-- Automatically released from fix/readme-stars-badge as a patch bump via #29. -->
 
 ## [0.5.4] - 2026-05-01
 
