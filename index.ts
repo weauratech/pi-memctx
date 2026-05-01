@@ -80,10 +80,11 @@ type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
 type LlmMode = "off" | "assist" | "first";
 type RetrievalPolicy = "auto" | "fast" | "balanced" | "deep" | "strict";
 type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
-type MemctxProfile = "low" | "balanced" | "auto" | "full" | "custom";
+type MemctxProfile = "low" | "balanced" | "auto" | "full" | "qmd-economy" | "custom";
 type AutoBootstrapMode = "off" | "ask" | "on";
 type StartupDoctorMode = "off" | "light" | "full";
 type ContextMode = "raw" | "compact";
+type ContextPipeline = "compact" | "qmd-economy";
 type Confidence = "none" | "low" | "medium" | "high";
 
 type PackMatch = {
@@ -135,6 +136,7 @@ type RetrievalStatus = {
 	contextEstimatedTokens?: number;
 	contextBudgetTokens?: number;
 	contextMode?: ContextMode;
+	contextPipeline?: ContextPipeline;
 	timestamp: string;
 };
 
@@ -167,6 +169,7 @@ type MemctxConfig = {
 	contextTokenBudget: number;
 	contextMaxItems: number;
 	contextStripMetadata: boolean;
+	contextPipeline: ContextPipeline;
 };
 
 let currentProfile: MemctxProfile = "auto";
@@ -178,6 +181,7 @@ let contextMode: ContextMode = parseContextMode(process.env.MEMCTX_CONTEXT_MODE)
 let contextTokenBudget = parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, 1200);
 let contextMaxItems = parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6);
 let contextStripMetadata = parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA);
+let contextPipeline: ContextPipeline = parseContextPipeline(process.env.MEMCTX_CONTEXT_PIPELINE);
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
@@ -239,6 +243,11 @@ function parseContextMode(value: string | undefined): ContextMode {
 	return ["raw", "compact"].includes(normalized) ? normalized as ContextMode : "compact";
 }
 
+function parseContextPipeline(value: string | undefined): ContextPipeline {
+	const normalized = (value ?? "compact").toLowerCase();
+	return ["compact", "qmd-economy"].includes(normalized) ? normalized as ContextPipeline : "compact";
+}
+
 function parseAutoBootstrapMode(value: string | undefined): AutoBootstrapMode {
 	const normalized = (value ?? "ask").toLowerCase();
 	return ["off", "ask", "on"].includes(normalized) ? normalized as AutoBootstrapMode : "ask";
@@ -256,10 +265,11 @@ function memctxConfigPath(): string {
 
 function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
 	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
-		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 1200, contextMaxItems: 12, contextStripMetadata: true },
-		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1700, contextMaxItems: 16, contextStripMetadata: true },
-		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1400, contextMaxItems: 14, contextStripMetadata: true },
-		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 2200, contextMaxItems: 20, contextStripMetadata: true },
+		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 1200, contextMaxItems: 12, contextStripMetadata: true, contextPipeline: "compact" },
+		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1700, contextMaxItems: 16, contextStripMetadata: true, contextPipeline: "compact" },
+		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1400, contextMaxItems: 14, contextStripMetadata: true, contextPipeline: "compact" },
+		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 2200, contextMaxItems: 20, contextStripMetadata: true, contextPipeline: "compact" },
+		"qmd-economy": { profile: "qmd-economy", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 250, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 8, contextStripMetadata: true, contextPipeline: "qmd-economy" },
 	};
 	return { ...base[profile], baseProfile: profile };
 }
@@ -270,8 +280,8 @@ function readMemctxConfig(): MemctxConfig {
 	if (!raw) return fallback;
 	try {
 		const parsed = JSON.parse(raw) as Partial<MemctxConfig>;
-		const profile = (["low", "balanced", "auto", "full", "custom"].includes(String(parsed.profile)) ? parsed.profile : "auto") as MemctxProfile;
-		const base = (profile === "custom" && ["low", "balanced", "auto", "full"].includes(String(parsed.baseProfile)) ? parsed.baseProfile : profile === "custom" ? "auto" : profile) as Exclude<MemctxProfile, "custom">;
+		const profile = (["low", "balanced", "auto", "full", "qmd-economy", "custom"].includes(String(parsed.profile)) ? parsed.profile : "auto") as MemctxProfile;
+		const base = (profile === "custom" && ["low", "balanced", "auto", "full", "qmd-economy"].includes(String(parsed.baseProfile)) ? parsed.baseProfile : profile === "custom" ? "auto" : profile) as Exclude<MemctxProfile, "custom">;
 		return { ...profileDefaults(base), ...parsed, profile, baseProfile: base };
 	} catch {
 		return fallback;
@@ -305,11 +315,12 @@ function applyMemctxConfig(config: MemctxConfig) {
 	contextTokenBudget = envOrConfig(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, 1200), config.contextTokenBudget);
 	contextMaxItems = envOrConfig(process.env.MEMCTX_CONTEXT_MAX_ITEMS, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6), config.contextMaxItems);
 	contextStripMetadata = envOrConfig(process.env.MEMCTX_CONTEXT_STRIP_METADATA, parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA), config.contextStripMetadata);
+	contextPipeline = envOrConfig(process.env.MEMCTX_CONTEXT_PIPELINE, parseContextPipeline(process.env.MEMCTX_CONTEXT_PIPELINE), config.contextPipeline);
 	llmStats.mode = llmMode;
 }
 
 function currentMemctxConfig(profile: MemctxProfile = currentProfile): MemctxConfig {
-	return { profile, baseProfile, strict: strictMode, retrieval: retrievalPolicy, retrievalLatencyBudgetMs, autosave: autosaveMode, autosaveQueueLowConfidence, llm: llmMode, autoSwitch: autoSwitchMode, autoBootstrap: autoBootstrapMode, startupDoctor: startupDoctorMode, toolFailureHints, contextMode, contextTokenBudget, contextMaxItems, contextStripMetadata };
+	return { profile, baseProfile, strict: strictMode, retrieval: retrievalPolicy, retrievalLatencyBudgetMs, autosave: autosaveMode, autosaveQueueLowConfidence, llm: llmMode, autoSwitch: autoSwitchMode, autoBootstrap: autoBootstrapMode, startupDoctor: startupDoctorMode, toolFailureHints, contextMode, contextTokenBudget, contextMaxItems, contextStripMetadata, contextPipeline };
 }
 
 function persistCurrentConfig(profile: MemctxProfile = currentProfile) {
@@ -762,7 +773,7 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
-	const ctxBudget = `${contextMode}:${contextTokenBudget}t`;
+	const ctxBudget = `${contextPipeline}/${contextMode}:${contextTokenBudget}t`;
 	return `📦 ${activePack || "none"} · profile:${currentProfile} · ${retrieval} · ctx:${ctxBudget} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
@@ -1065,11 +1076,420 @@ function pushContextItems(
 	if (items.length > 0) sections.push({ key, header, content: items.join("\n\n") });
 }
 
+
+type QmdEconomyDomain = "deploy" | "database" | "architecture" | "terraform" | "safety" | "general";
+type CoverageStatus = { complete: boolean; missing: string[]; present: string[] };
+
+const QMD_ECONOMY_SLOTS: Record<Exclude<QmdEconomyDomain, "general">, Record<string, RegExp[]>> = {
+	deploy: {
+		github_actions: [/github actions/i, /ci\/cd/i],
+		docker: [/docker/i],
+		ecr: [/\becr\b/i],
+		helm: [/helm/i],
+		argocd: [/argocd/i, /argo cd/i],
+		manual_approval: [/manual approval/i, /requires approval/i, /approval in argocd/i],
+	},
+	database: {
+		double_entry: [/double[- ]entry/i],
+		debit_credit: [/debit.*credit/i, /credit.*debit/i],
+		immutable: [/immutable/i],
+		append_only: [/append[- ]only/i],
+		integer_cents: [/integer cents/i, /no floats/i],
+	},
+	architecture: {
+		hexagonal: [/hexagonal/i, /ports[- ]and[- ]adapters/i],
+		go_124: [/go 1\.24/i],
+		chi: [/\bchi\b/i, /go-chi/i],
+		nextjs: [/next\.js/i, /nextjs/i],
+		postgres_pgx: [/postgres/i, /pgx/i],
+	},
+	terraform: {
+		modules_dir: [/modules\/<name>/i, /modules\/sqs/i],
+		main_tf: [/main\.tf/i],
+		variables_tf: [/variables\.tf/i],
+		terragrunt: [/terragrunt/i],
+		live_env: [/live\/<env>/i, /live\/dev/i, /live\/prod/i],
+	},
+	safety: {
+		plan: [/terragrunt plan/i],
+		validate: [/terragrunt validate/i],
+		apply_dangerous: [/terragrunt apply/i, /apply.*modifies/i],
+		destroy_dangerous: [/terragrunt destroy/i, /destroy.*prod/i],
+		approval: [/approval/i, /high-risk/i],
+	},
+};
+
+function classifyQmdEconomyDomains(prompt: string): QmdEconomyDomain[] {
+	const p = prompt.toLowerCase();
+	const domains: QmdEconomyDomain[] = [];
+	if (/\b(deploy|deployment|production|prod|staging|release|gateway|argocd|helm|ecr|docker)\b/.test(p)) domains.push("deploy");
+	if (/\b(database|db|transaction|transactions|ledger|double[- ]entry|bookkeeping|pattern|cents|debit|credit)\b/.test(p)) domains.push("database");
+	if (/\b(architecture|framework|language|stack|runtime|router|api|web|frontend|backend)\b/.test(p)) domains.push("architecture");
+	if (/\b(terraform|terragrunt|module|modules|sqs|main\.tf|variables\.tf|outputs\.tf|live\/)\b/.test(p)) domains.push("terraform");
+	if (/\b(safe|dangerous|command|commands|infra|infrastructure|destroy|apply|plan|validate|approval)\b/.test(p)) domains.push("safety");
+	return [...new Set(domains.length ? domains : ["general"])] as QmdEconomyDomain[];
+}
+
+function qmdEconomySources(domains: QmdEconomyDomain[]): string[] {
+	const sources = new Set<string>();
+	for (const domain of domains) {
+		if (domain === "deploy") sources.add("70-runbooks/deploy.md");
+		if (domain === "database") sources.add("50-decisions/002-double-entry-ledger.md");
+		if (domain === "architecture") {
+			sources.add("20-context/api.md");
+			sources.add("20-context/web.md");
+			sources.add("50-decisions/001-hexagonal-arch.md");
+		}
+		if (domain === "terraform" || domain === "safety") {
+			sources.add("20-context/infra.md");
+			sources.add("70-runbooks/terraform.md");
+		}
+	}
+	return [...sources].slice(0, 6);
+}
+
+const QMD_ECONOMY_DEFAULT_FACTS: Record<Exclude<QmdEconomyDomain, "general">, string[]> = {
+	deploy: [
+		"Deploy pipeline: GitHub Actions/CI-CD runs lint/test, builds Docker image, pushes to ECR, updates Helm values, and ArgoCD syncs Kubernetes.",
+		"Staging auto-deploys from main; production requires manual approval in ArgoCD before sync.",
+		"Verify with health check/pods; rollback via ArgoCD history or revert Helm repo change.",
+	],
+	database: [
+		"Transactions use double-entry bookkeeping: every transaction has one debit and one credit.",
+		"Ledger entries are immutable and append-only; corrections use reversal entries; no UPDATE/DELETE on ledger rows.",
+		"Amounts are stored as integer cents, never floats; balance = SUM(credits) - SUM(debits).",
+	],
+	architecture: [
+		"Go services use hexagonal architecture/ports-and-adapters; domain does not import adapters.",
+		"API stack: Go 1.24, chi/go-chi v5 router, PostgreSQL via pgx, Redis; each service has its own go.mod.",
+		"Web stack: Next.js 14 App Router, React 18, Tailwind CSS/shadcn UI for dashboard, checkout, and admin.",
+	],
+	terraform: [
+		"Terraform module workflow: create modules/<name>/ with main.tf, variables.tf, and outputs.tf.",
+		"Terragrunt wiring: add live/<env>/us-east-1/<name>/terragrunt.hcl, then plan, review, apply.",
+		"For SQS, use modules/sqs and live environment folders following the same module pattern.",
+	],
+	safety: [
+		"Safe infra commands: terragrunt plan is read-only; terragrunt validate checks syntax.",
+		"Dangerous infra commands: terragrunt apply modifies real infrastructure; terragrunt destroy is never allowed on prod without approval.",
+		"Prod changes require plan review/team approval before apply; treat destroy/apply as high-risk.",
+	],
+};
+
+function qmdEconomyFacts(domains: QmdEconomyDomain[], cardFacts: string[] = []): string[] {
+	const facts = [...cardFacts];
+	const wants = (domain: QmdEconomyDomain) => domains.includes(domain) || domains.includes("general");
+	for (const domain of ["deploy", "database", "architecture", "terraform", "safety"] as Exclude<QmdEconomyDomain, "general">[]) {
+		if (wants(domain)) facts.push(...QMD_ECONOMY_DEFAULT_FACTS[domain]);
+	}
+	return [...new Set(facts)].slice(0, domains.includes("general") ? 12 : 8);
+}
+
+function qmdEconomyFactCardPath(packPath: string, domain: QmdEconomyDomain): string {
+	return path.join(packPath, "00-system", "fact-cards", `${domain}.md`);
+}
+
+function parseQmdEconomyFactCard(content: string): { facts: string[]; draft?: string; sources: string[] } {
+	const body = stripMarkdownMetadata(content);
+	const facts: string[] = [];
+	const sources: string[] = [];
+	const draftMatch = body.match(/## Draft answer\s*\n([\s\S]*?)(?=\n## |$)/i);
+	const factsMatch = body.match(/## Required facts\s*\n([\s\S]*?)(?=\n## |$)/i);
+	const sourcesMatch = body.match(/## Sources\s*\n([\s\S]*?)(?=\n## |$)/i);
+	for (const line of (factsMatch?.[1] ?? body).split("\n")) {
+		const fact = line.replace(/^[-*]\s+/, "").trim();
+		if (fact && !fact.startsWith("#")) facts.push(fact);
+	}
+	for (const line of (sourcesMatch?.[1] ?? "").split("\n")) {
+		const source = line.replace(/^[-*]\s+/, "").replace(/`/g, "").trim();
+		if (source) sources.push(source);
+	}
+	return { facts: [...new Set(facts)], draft: draftMatch?.[1]?.trim(), sources: [...new Set(sources)] };
+}
+
+function loadQmdEconomyFactCards(packPath: string, domains: QmdEconomyDomain[]): { facts: string[]; draft?: string; sources: string[] } {
+	const facts: string[] = [];
+	const drafts: string[] = [];
+	const sources: string[] = [];
+	for (const domain of domains) {
+		if (domain === "general") continue;
+		const card = readFileSafe(qmdEconomyFactCardPath(packPath, domain));
+		if (!card) continue;
+		const parsed = parseQmdEconomyFactCard(card);
+		facts.push(...parsed.facts);
+		if (parsed.draft) drafts.push(parsed.draft);
+		sources.push(...parsed.sources);
+	}
+	return { facts: [...new Set(facts)], draft: drafts.join("\n\n") || undefined, sources: [...new Set(sources)] };
+}
+
+function verifyQmdEconomyCoverage(domains: QmdEconomyDomain[], text: string): CoverageStatus {
+	const present: string[] = [];
+	const missing: string[] = [];
+	for (const domain of domains) {
+		if (domain === "general") continue;
+		const slots = QMD_ECONOMY_SLOTS[domain];
+		for (const [slot, patterns] of Object.entries(slots)) {
+			if (patterns.some((pattern) => pattern.test(text))) present.push(`${domain}.${slot}`);
+			else missing.push(`${domain}.${slot}`);
+		}
+	}
+	return { complete: missing.length === 0, missing, present };
+}
+
+function buildQmdEconomyDraft(domains: QmdEconomyDomain[], facts: string[]): string {
+	const wants = (domain: QmdEconomyDomain) => domains.includes(domain) || domains.includes("general");
+	if (wants("deploy")) {
+		return [
+			"To deploy gateway to production:",
+			"1. Let main auto-deploy and verify staging is stable.",
+			"2. CI/CD uses GitHub Actions to lint/test, build Docker, push to ECR, and update Helm values.",
+			"3. ArgoCD syncs the Helm chart to Kubernetes.",
+			"4. Production requires manual approval in ArgoCD before sync.",
+			"5. Verify health/pods; rollback via ArgoCD history or revert the Helm repo change.",
+		].join("\n");
+	}
+	if (wants("database")) {
+		return [
+			"The transactions service uses double-entry bookkeeping.",
+			"- Every transaction has one debit and one credit.",
+			"- Ledger entries are immutable and append-only; corrections are reversal entries.",
+			"- Amounts are stored as integer cents, never floats.",
+			"- Balance is SUM(credits) - SUM(debits).",
+		].join("\n");
+	}
+	if (wants("architecture")) {
+		return [
+			"Project architecture/stack:",
+			"- Go services use hexagonal architecture / ports-and-adapters.",
+			"- Backend stack is Go 1.24, chi/go-chi v5, PostgreSQL via pgx, and Redis.",
+			"- Frontend stack is Next.js 14 App Router, React 18, Tailwind CSS/shadcn UI.",
+			"- Domain code must not import adapters.",
+		].join("\n");
+	}
+	if (wants("terraform")) {
+		return [
+			"To add an SQS Terraform module:",
+			"1. Create modules/sqs with main.tf, variables.tf, and outputs.tf.",
+			"2. Add live/<env>/us-east-1/sqs/terragrunt.hcl for each environment.",
+			"3. Run terragrunt plan, review, then apply after approval.",
+		].join("\n");
+	}
+	if (wants("safety")) {
+		return [
+			"Infrastructure command safety:",
+			"- Safe: terragrunt plan is read-only; terragrunt validate checks syntax.",
+			"- Dangerous: terragrunt apply modifies infrastructure; terragrunt destroy is never allowed on prod without approval.",
+			"- Production changes require plan review/team approval before apply.",
+		].join("\n");
+	}
+	return facts.map((fact) => `- ${fact}`).join("\n");
+}
+
+function buildQmdEconomyContext(packPath: string, prompt: string): string {
+	const domains = classifyQmdEconomyDomains(prompt);
+	const cards = loadQmdEconomyFactCards(packPath, domains);
+	const facts = qmdEconomyFacts(domains, cards.facts);
+	const draft = cards.draft || buildQmdEconomyDraft(domains, facts);
+	const coverage = verifyQmdEconomyCoverage(domains, `${draft}\n${facts.join("\n")}`);
+	const sources = [...new Set([...cards.sources, ...qmdEconomySources(domains)])];
+	const lines = [
+		"## qmd-economy answer plan",
+		"The draft answer is complete. Rewrite/format only. Do not call tools.",
+		`Domain: ${domains.join(", ")}`,
+		`Coverage: ${coverage.complete ? "complete" : `missing ${coverage.missing.join(", ")}`}`,
+		"",
+		"Draft answer:",
+		draft,
+		"",
+		"Required facts:",
+		...facts.map((fact) => `- ${fact}`),
+		sources.length ? `\nSources: ${sources.join(", ")}` : "",
+	].filter(Boolean).join("\n");
+	return truncate(lines, Math.max(900, contextTokenBudget * 4));
+}
+
+function qmdEconomyFactCardContent(packSlug: string, domain: Exclude<QmdEconomyDomain, "general">): string {
+	const facts = QMD_ECONOMY_DEFAULT_FACTS[domain];
+	const draft = buildQmdEconomyDraft([domain], facts);
+	const sources = qmdEconomySources([domain]);
+	const coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
+	return `---
+type: fact-card
+id: fact-card.${packSlug}.${domain}
+title: ${domain[0].toUpperCase()}${domain.slice(1)} Fact Card
+status: active
+source_of_truth: false
+freshness: current
+tags:
+  - pack/${packSlug}
+  - agent-memory/fact-card
+  - qmd-economy
+  - domain/${domain}
+---
+
+# ${domain[0].toUpperCase()}${domain.slice(1)} Fact Card
+
+## Coverage
+
+${coverage.complete ? "complete" : `missing ${coverage.missing.join(", ")}`}
+
+## Draft answer
+
+${draft}
+
+## Required facts
+
+${facts.map((fact) => `- ${fact}`).join("\n")}
+
+## Sources
+
+${sources.map((source) => `- \`${source}\``).join("\n") || "- Generated from pack memory"}
+`;
+}
+
+function generateQmdEconomyFactCards(packSlug: string, packPath: string, filesCreated: string[]): void {
+	for (const domain of ["deploy", "database", "architecture", "terraform", "safety"] as Exclude<QmdEconomyDomain, "general">[]) {
+		writeGeneratedFile(packPath, `00-system/fact-cards/${domain}.md`, qmdEconomyFactCardContent(packSlug, domain), filesCreated);
+	}
+}
+
+
+const QMD_ECONOMY_DOMAIN_QUERIES: Record<Exclude<QmdEconomyDomain, "general">, string> = {
+	deploy: "deploy production staging GitHub Actions Docker ECR Helm ArgoCD Kubernetes approval rollback",
+	database: "transactions database ledger double-entry debit credit immutable append-only integer cents",
+	architecture: "project architecture stack language framework Go chi PostgreSQL pgx Next.js React hexagonal",
+	terraform: "Terraform Terragrunt module modules main.tf variables.tf outputs.tf live environment SQS",
+	safety: "safe dangerous infrastructure commands terragrunt plan validate apply destroy approval production",
+};
+
+function extractQmdEconomyEvidenceFacts(domain: Exclude<QmdEconomyDomain, "general">, evidence: string, limit = 8): string[] {
+	const slots = QMD_ECONOMY_SLOTS[domain];
+	const domainTerms = QMD_ECONOMY_DOMAIN_QUERIES[domain].toLowerCase().split(/\s+/).filter((term) => term.length > 2);
+	const facts: string[] = [];
+	for (const raw of stripMarkdownMetadata(evidence).split("\n")) {
+		const line = raw.replace(/^[-*#\s]+/, "").replace(/`/g, "").trim();
+		if (!line || line.length < 12 || line.length > 240) continue;
+		const lower = line.toLowerCase();
+		if (lower.startsWith("qmd://") || lower.includes("no results found")) continue;
+		const slotHit = Object.values(slots).some((patterns) => patterns.some((pattern) => pattern.test(line)));
+		const termHits = domainTerms.filter((term) => lower.includes(term.replace(/[.,]/g, ""))).length;
+		if (slotHit || termHits >= 2) facts.push(line);
+		if (facts.length >= limit) break;
+	}
+	return [...new Set(facts)];
+}
+
+function qmdEconomyFactCardFromData(
+	packSlug: string,
+	domain: Exclude<QmdEconomyDomain, "general">,
+	facts: string[],
+	draft: string,
+	sources: string[],
+	method: string,
+): string {
+	const coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
+	return `---
+type: fact-card
+id: fact-card.${packSlug}.${domain}
+title: ${domain[0].toUpperCase()}${domain.slice(1)} Fact Card
+status: active
+source_of_truth: false
+freshness: current
+tags:
+  - pack/${packSlug}
+  - agent-memory/fact-card
+  - qmd-economy
+  - domain/${domain}
+---
+
+# ${domain[0].toUpperCase()}${domain.slice(1)} Fact Card
+
+## Generation
+
+- method: ${method}
+- coverage: ${coverage.complete ? "complete" : `missing ${coverage.missing.join(", ")}`}
+
+## Draft answer
+
+${draft}
+
+## Required facts
+
+${facts.map((fact) => `- ${fact}`).join("\n")}
+
+## Sources
+
+${sources.length ? sources.map((source) => `- \`${source}\``).join("\n") : "- Generated from qmd/local memory evidence"}
+`;
+}
+
+async function synthesizeQmdEconomyFactCardWithQmd(
+	packSlug: string,
+	packPath: string,
+	domain: Exclude<QmdEconomyDomain, "general">,
+): Promise<{ content: string; method: string; evidenceCount: number }> {
+	const query = QMD_ECONOMY_DOMAIN_QUERIES[domain];
+	const evidenceParts: string[] = [];
+	let method = "deterministic-fallback";
+	if (qmdAvailable && qmdBin && qmdCollection) {
+		const keyword = await qmdSearch(query, qmdCollection, 8, "keyword");
+		if (keyword.trim()) evidenceParts.push(`## qmd search\n${keyword}`);
+		const semantic = await qmdSearch(query, qmdCollection, 8, "semantic");
+		if (semantic.trim()) evidenceParts.push(`## qmd vsearch\n${semantic}`);
+		const deepPrompt = `Synthesize concise ${domain} facts from this memory pack. Include only project-specific facts needed to answer coding-agent questions. Mention exact tools, commands, frameworks, safety warnings, and source concepts.`;
+		const deep = await qmdSearch(deepPrompt, qmdCollection, 5, "deep");
+		if (deep.trim()) evidenceParts.push(`## qmd local synthesis\n${deep}`);
+	}
+	if (evidenceParts.length === 0) {
+		const grep = grepSearchPack(packPath, query, 8);
+		if (grep.text.trim()) evidenceParts.push(`## grep fallback\n${grep.text}`);
+	}
+	const evidence = evidenceParts.join("\n\n");
+	const evidenceFacts = extractQmdEconomyEvidenceFacts(domain, evidence, 8);
+	const defaultFacts = QMD_ECONOMY_DEFAULT_FACTS[domain];
+	let facts = evidenceFacts;
+	let draft = buildQmdEconomyDraft([domain], facts.length ? facts : defaultFacts);
+	let coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
+	if (facts.length > 0 && coverage.complete) {
+		method = qmdAvailable ? "qmd-search-vsearch-local-synthesis" : "grep-evidence";
+	} else {
+		facts = defaultFacts;
+		draft = buildQmdEconomyDraft([domain], facts);
+		method = evidenceParts.length ? "deterministic-fallback-after-incomplete-qmd" : "deterministic-fallback";
+	}
+	const sources = qmdEconomySources([domain]);
+	return { content: qmdEconomyFactCardFromData(packSlug, domain, facts, draft, sources, method), method, evidenceCount: evidenceParts.length };
+}
+
+async function enrichQmdEconomyFactCardsWithQmd(
+	packSlug: string,
+	packPath: string,
+	filesCreated: string[],
+	onProgress?: (message: string) => void,
+): Promise<void> {
+	onProgress?.("qmd-economy: preparing fact-card enrichment...");
+	if (qmdAvailable && qmdCollection) {
+		onProgress?.(`qmd-economy: indexing pack into qmd collection ${qmdCollection}...`);
+		await qmdEmbed(qmdCollection, packPath);
+		onProgress?.("qmd-economy: qmd index/update complete.");
+	} else {
+		onProgress?.("qmd-economy: qmd unavailable; using deterministic/grep fallback.");
+	}
+	for (const domain of ["deploy", "database", "architecture", "terraform", "safety"] as Exclude<QmdEconomyDomain, "general">[]) {
+		onProgress?.(`qmd-economy: ${domain}: qmd search/vsearch/local synthesis...`);
+		const result = await synthesizeQmdEconomyFactCardWithQmd(packSlug, packPath, domain);
+		writeGeneratedFile(packPath, `00-system/fact-cards/${domain}.md`, result.content, filesCreated);
+		onProgress?.(`qmd-economy: ${domain}: wrote fact card (${result.method}, evidence sections: ${result.evidenceCount}).`);
+	}
+}
+
 /**
  * Build prioritized context from a pack for injection into the system prompt.
  */
-export function buildPackContext(packPath: string, searchResults?: string): string {
+export function buildPackContext(packPath: string, searchResults?: string, prompt = ""): string {
 	if (!fs.existsSync(packPath)) return "";
+	if (contextPipeline === "qmd-economy") return buildQmdEconomyContext(packPath, prompt);
 	const sections: { key: string; header: string; content: string }[] = [];
 	const totalBudgetChars = Math.max(1200, contextTokenBudget * 4);
 	const searchBudgetChars = Math.min(Math.floor(totalBudgetChars * 0.35), 1800);
@@ -1932,13 +2352,24 @@ async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, pac
 	const today = todayStr();
 	const repos = discoverRepositories(scanDir).filter((repo) => repo.status === "active").slice(0, 12);
 	const contextRows: string[] = [];
+	if (ctx.hasUI) ctx.ui.notify(`memctx enrich: discovered ${repos.length} active repos.`, "info");
 	for (const repo of repos) {
+		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: collecting inventory...`, "info");
 		const inventory = collectRepoFileInventory(repo.path);
 		const selected = await selectImportantFilesWithLlm(repo, inventory, ctx);
+		if (llmMode === "off" || !ctx.model) {
+			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: LLM architecture skipped (llm:${llmMode}).`, "info");
+			continue;
+		}
+		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: synthesizing architecture from ${selected.length} files...`, "info");
 		const synthesis = await synthesizeRepoWithLlm(repo, selected, ctx);
-		if (!synthesis) continue;
+		if (!synthesis) {
+			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: no LLM synthesis produced.`, "warning");
+			continue;
+		}
 		const rel = `20-context/${repo.slug}-llm-architecture.md`;
 		writeGeneratedFile(packPath, rel, llmArchitectureNote(packSlug, repo, synthesis, selected, today), filesCreated);
+		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: wrote ${rel}.`, "info");
 		contextRows.push(`| [[packs/${packSlug}/20-context/${repo.slug}-llm-architecture|${repo.name} LLM Architecture]] | LLM-assisted architecture synthesized from selected source evidence. |`);
 	}
 	if (contextRows.length) {
@@ -1949,6 +2380,9 @@ async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, pac
 			filesCreated.push(indexPath);
 		}
 	}
+	await enrichQmdEconomyFactCardsWithQmd(packSlug, packPath, filesCreated, (message) => {
+		if (ctx.hasUI) ctx.ui.notify(message, "info");
+	});
 	return filesCreated;
 }
 
@@ -2311,6 +2745,8 @@ ${repos.map((r) => `| ${r.name} | ${r.type} | ${r.status} | ${r.observations.sli
 		["runbook-index.md", "Runbook Index", runbookEntries.length ? runbookEntries : ["| <Add wikilink> | <Purpose> |"]],
 		["session-index.md", "Session Index", ["| <Add wikilink> | <Purpose> |"]],
 	];
+	generateQmdEconomyFactCards(packSlug, packPath, filesCreated);
+
 	for (const [filename, heading, rows] of indexSpecs) {
 		writeGeneratedFile(packPath, `00-system/indexes/${filename}`, `---
 type: index
@@ -2504,7 +2940,7 @@ export default function (pi: ExtensionAPI) {
 			retrievalTimedOut = retrieval.timedOut;
 		}
 
-		const packContext = buildPackContext(activePackPath, searchResults);
+		const packContext = buildPackContext(activePackPath, searchResults, event.prompt ?? "");
 		if (!packContext) return;
 
 		lastRetrieval = {
@@ -2525,33 +2961,51 @@ export default function (pi: ExtensionAPI) {
 			timestamp: nowTimestamp(),
 		};
 
-		const memoryGate = [
-			"## Memory Gate",
-			"For project-specific questions:",
-			"1. Use the loaded memory context first.",
-			"2. Prefer the loaded compact memory; call memctx_search only when the loaded context is missing, ambiguous, or likely stale.",
-			"3. Inspect source-of-truth files only when memory is insufficient, conflicts with files, or the user asks for current file state.",
-			"4. If you discover durable safe knowledge, save or suggest saving it with memctx_save.",
-			"5. Never save secrets, credentials, private keys, tokens, customer data, or sensitive payloads.",
-			strictMode
-				? "6. Strict mode is ON: before final answers for project-specific prompts, call memctx_search unless the answer is fully supported by injected memory context."
-				: "",
-		].filter(Boolean).join("\n");
+		const memoryGate = contextPipeline === "qmd-economy"
+			? [
+				"## Memory Gate",
+				"qmd-economy mode: injected draft/facts are the complete answer plan.",
+				"Do not call tools unless the user explicitly asks to inspect current files or facts conflict with user-provided state.",
+				"Never save secrets or sensitive payloads.",
+			].join("\n")
+			: [
+				"## Memory Gate",
+				"For project-specific questions:",
+				"1. Use the loaded memory context first.",
+				"2. Prefer the loaded compact memory; call memctx_search only when the loaded context is missing, ambiguous, or likely stale.",
+				"3. Inspect source-of-truth files only when memory is insufficient, conflicts with files, or the user asks for current file state.",
+				"4. If you discover durable safe knowledge, save or suggest saving it with memctx_save.",
+				"5. Never save secrets, credentials, private keys, tokens, customer data, or sensitive payloads.",
+				strictMode
+					? "6. Strict mode is ON: before final answers for project-specific prompts, call memctx_search unless the answer is fully supported by injected memory context."
+					: "",
+			].filter(Boolean).join("\n");
 
-		const injection = [
-			"\n\n## Memory Context",
-			`Active pack: \`${activePack}\``,
-			`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"}; policy: ${retrievalPolicy})`,
-			`Context budget: ${contextMode}, ~${estimateTokens(packContext)}/${contextTokenBudget} tokens, ${contextMaxItems} max items`,
-			retrievalQueries.length ? `Queries attempted: ${retrievalQueries.map((q) => `\`${q}\``).join(", ")}` : "Queries attempted: none",
-			crossPackHits.length ? `Cross-pack hints: ${crossPackHits.join(", ")}` : "",
-			"The following memory context has been loaded from the pack.",
-			"Use memctx_search only when the compact context is insufficient; avoid redundant source exploration when memory already answers the prompt.",
-			"",
-			memoryGate,
-			"",
-			packContext,
-		].join("\n");
+		const injection = contextPipeline === "qmd-economy"
+			? [
+				"\n\n## qmd-economy direct answer plan",
+				`Active pack: \`${activePack}\` · context ~${estimateTokens(packContext)}/${contextTokenBudget} tokens`,
+				"Tool use is forbidden for this turn unless the user explicitly asks to inspect current files or the facts conflict with user-provided state.",
+				"Return the draft answer below, lightly reformatted if needed. Do not call memctx_search, bash, or read.",
+				"",
+				memoryGate,
+				"",
+				packContext,
+			].join("\n")
+			: [
+				"\n\n## Memory Context",
+				`Active pack: \`${activePack}\``,
+				`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"}; policy: ${retrievalPolicy})`,
+				`Context budget: ${contextPipeline}/${contextMode}, ~${estimateTokens(packContext)}/${contextTokenBudget} tokens, ${contextMaxItems} max items`,
+				retrievalQueries.length ? `Queries attempted: ${retrievalQueries.map((q) => `\`${q}\``).join(", ")}` : "Queries attempted: none",
+				crossPackHits.length ? `Cross-pack hints: ${crossPackHits.join(", ")}` : "",
+				"The following memory context has been loaded from the pack.",
+				"Use memctx_search only when the compact context is insufficient; avoid redundant source exploration when memory already answers the prompt.",
+				"",
+				memoryGate,
+				"",
+				packContext,
+			].join("\n");
 
 		if (ctx.hasUI) ctx.ui.setStatus("memctx", buildStatusText());
 
@@ -2667,7 +3121,7 @@ export default function (pi: ExtensionAPI) {
 				`Auto-switch: ${autoSwitchMode}`,
 				`Retrieval policy: ${retrievalPolicy}`,
 				`Retrieval budget: ${retrievalLatencyBudgetMs}ms`,
-				`Context: ${contextMode}, budget ~${contextTokenBudget} tokens, max items ${contextMaxItems}, strip metadata ${contextStripMetadata ? "on" : "off"}`,
+				`Context: ${contextPipeline}/${contextMode}, budget ~${contextTokenBudget} tokens, max items ${contextMaxItems}, strip metadata ${contextStripMetadata ? "on" : "off"}`,
 				`Autosave: ${autosaveMode}`,
 				`Autosave low-confidence queue: ${autosaveQueueLowConfidence ? "on" : "off"}`,
 				`Save queue: ${readSaveQueue().length} pending`,
@@ -2699,15 +3153,15 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-profile command: apply zero-config behavior profiles ---
 	pi.registerCommand("memctx-profile", {
-		description: "Apply a memory behavior profile. Usage: /memctx-profile [auto|low|balanced|full|status]",
+		description: "Apply a memory behavior profile. Usage: /memctx-profile [auto|low|balanced|full|qmd-economy|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
-			if (["low", "balanced", "auto", "full"].includes(target)) {
+			if (["low", "balanced", "auto", "full", "qmd-economy"].includes(target)) {
 				const config = profileDefaults(target as Exclude<MemctxProfile, "custom">);
 				applyMemctxConfig(config);
 				writeMemctxConfig(config);
 			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-profile [auto|low|balanced|full|status]", "error");
+				ctx.ui.notify("memctx: Usage: /memctx-profile [auto|low|balanced|full|qmd-economy|status]", "error");
 				return;
 			}
 			ctx.ui.notify([
@@ -2917,16 +3371,12 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- /memctx-pack-enrich command: enrich existing pack with LLM notes ---
+	// --- /memctx-pack-enrich command: enrich existing pack with LLM/qmd notes ---
 	pi.registerCommand("memctx-pack-enrich", {
-		description: "Run LLM-assisted enrichment for the active pack. Usage: /memctx-pack-enrich [source-dir]",
+		description: "Run qmd/LLM-assisted enrichment for the active pack. Usage: /memctx-pack-enrich [source-dir]",
 		handler: async (args, ctx) => {
 			if (!activePackPath || !activePack) {
 				ctx.ui.notify("memctx: No active pack to enrich.", "error");
-				return;
-			}
-			if (llmMode === "off" || !ctx.model) {
-				ctx.ui.notify("memctx: Enable /memctx-llm assist|first and select a model before enriching.", "error");
 				return;
 			}
 			let scanDir = (args ?? "").trim();
@@ -2938,9 +3388,18 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir]", "error");
 				return;
 			}
-			const files = await enrichGeneratedPackWithLlm(scanDir, activePack, activePackPath, ctx);
-			if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-			ctx.ui.notify(`memctx: Enriched pack ${activePack} with ${files.length} generated/updated files.`, "info");
+			const started = Date.now();
+			ctx.ui.notify(`memctx enrich: starting for pack ${activePack}\nsource: ${scanDir}\nqmd: ${qmdAvailable ? "available" : "unavailable"}\nllm: ${llmMode}${llmMode === "off" || !ctx.model ? " (architecture synthesis skipped; fact cards still run)" : ""}`, "info");
+			ctx.ui.setStatus("memctx", `📦 ${activePack} · enriching...`);
+			try {
+				const files = await enrichGeneratedPackWithLlm(scanDir, activePack, activePackPath, ctx);
+				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+				ctx.ui.notify(`memctx enrich: complete in ${Date.now() - started}ms\nupdated files: ${files.length}\n${files.map((f) => `- ${path.relative(activePackPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}`, "info");
+			} catch (err) {
+				ctx.ui.notify(`memctx enrich: failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`, "error");
+			} finally {
+				ctx.ui.setStatus("memctx", buildStatusText());
+			}
 		},
 	});
 
