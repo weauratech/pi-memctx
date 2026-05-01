@@ -6,7 +6,9 @@ pi-memctx is a single Pi extension implemented in `index.ts`.
 
 ```txt
 session_start
+  -> load persistent profile/config from ~/.config/pi-memctx/config.json
   -> resolve pack directory
+  -> ask before bootstrapping a pack when no pack is found
   -> detect active pack
   -> resolve qmd from MEMCTX_QMD_BIN, PATH, or bundled optional dependency
   -> optionally index with qmd
@@ -51,7 +53,7 @@ memctx-pack-generate
 - Markdown-first: memory is reviewable with normal tools.
 - Bounded context: lower-priority sections are trimmed before flooding the prompt.
 - qmd optional: semantic search is attempted automatically when available, but grep fallback remains the hard guarantee.
-- Observable memory state: `/memctx-pack-status` reports active pack, qmd resolution, LLM mode, strict mode, retrieval policy, autosave mode, and last retrieval; the footer overlay includes current `memctx-strict`, `memctx-llm`, retrieval, and autosave values.
+- Observable memory state: `/memctx-pack-status` reports active pack, profile/config, qmd resolution, LLM mode, strict mode, retrieval policy, autosave mode, and last retrieval; the footer overlay includes current profile, `memctx-strict`, `memctx-llm`, retrieval, and autosave values.
 - Strict guidance defaults to on. Disable with `MEMCTX_STRICT=false` or `/memctx-strict off` when lower retrieval pressure is preferred.
 - Source of truth wins: repository files and live system state override memory notes.
 - Generated memory is conservative: deterministic pack generation avoids destructive commands and redacts sensitive-looking values.

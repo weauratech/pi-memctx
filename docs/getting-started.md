@@ -53,6 +53,8 @@ See `examples/basic-pack/` for a minimal public-safe pack.
 
 Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
 
+pi-memctx starts with `profile:auto` and persists config in `~/.config/pi-memctx/config.json`. Use `/memctx-profile low|balanced|auto|full` to switch behavior profiles, or `/memctx-config reset` to return to defaults.
+
 Strict mode is on by default for stronger retrieval guidance before project-specific answers. You can toggle it when needed:
 
 ```txt
@@ -60,7 +62,7 @@ Strict mode is on by default for stronger retrieval guidance before project-spec
 /memctx-strict off
 ```
 
-Configure automatic pack switching and LLM assistance:
+Advanced commands can override the active profile and mark it `custom`:
 
 ```txt
 /memctx-auto-switch all

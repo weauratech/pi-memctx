@@ -117,6 +117,8 @@ async function main() {
 	assert(!!commands["memctx-save-queue"], "/memctx-save-queue command registered");
 	assert(!!commands["memctx-doctor"], "/memctx-doctor command registered");
 	assert(!!commands["memctx-pack-enrich"], "/memctx-pack-enrich command registered");
+	assert(!!commands["memctx-profile"], "/memctx-profile command registered");
+	assert(!!commands["memctx-config"], "/memctx-config command registered");
 	assert(!!hooks.session_start, "session_start hook registered");
 	assert(!!hooks.before_agent_start, "before_agent_start hook registered");
 	assert(!!hooks.session_before_compact, "session_before_compact hook registered");

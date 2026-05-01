@@ -44,10 +44,12 @@ let tmpDir: string;
 
 function setupTmpDir() {
 	tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "amv-test-"));
+	process.env.MEMCTX_CONFIG_PATH = path.join(tmpDir, "config.json");
 }
 
 function cleanupTmpDir() {
 	_resetState();
+	delete process.env.MEMCTX_CONFIG_PATH;
 	fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
@@ -259,6 +261,7 @@ function createMockCtx(sessionId = "abcdef1234567890") {
 			notify: mock(() => {}),
 			setStatus: mock(() => {}),
 			setWidget: mock(() => {}),
+			confirm: mock(async () => false),
 		},
 		cwd: tmpDir,
 	};
@@ -841,7 +844,10 @@ describe("extension registration", () => {
 		expect(commands["memctx-save-queue"]).toBeDefined();
 		expect(commands["memctx-doctor"]).toBeDefined();
 		expect(commands["memctx-pack-enrich"]).toBeDefined();
+		expect(commands["memctx-profile"]).toBeDefined();
+		expect(commands["memctx-config"]).toBeDefined();
 	});
+
 
 	test("/memctx-strict updates the status overlay", async () => {
 		const { pi, commands } = createMockPi();
