@@ -2,7 +2,7 @@
 
 Measure the local impact of pi-memctx inside your own Pi CLI.
 
-The benchmark compares the same tasks with **no extensions** (`baseline`) and with pi-memctx loaded using a profile such as `full`. It does not add extension slash commands; it runs Pi in print mode with isolated environment variables.
+The benchmark compares the same tasks with **no extensions** (`baseline`) and with pi-memctx loaded using the `qmd-economy` profile. It does not add extension slash commands; it runs Pi in print mode with isolated environment variables.
 
 ## Quick start
 
@@ -10,14 +10,14 @@ The benchmark compares the same tasks with **no extensions** (`baseline`) and wi
 # 1. Setup fake project + pack
 bash benchmark/setup.sh
 
-# 2. Run local comparison: baseline vs profile:full
+# 2. Run local comparison: baseline vs qmd-economy
 bash benchmark/run.sh
 ```
 
 Optional:
 
 ```bash
-BENCH_REPEATS=2 BENCH_PROFILES="baseline auto full" bash benchmark/run.sh
+BENCH_REPEATS=2 BENCH_PROFILES="baseline qmd-economy" bash benchmark/run.sh
 BENCH_PI_MODEL="github-copilot/gpt-5.5" bash benchmark/run.sh
 ```
 
@@ -44,17 +44,18 @@ Each task runs for each selected profile.
 
 ## Expected results
 
-With pi-memctx:
-- **Fewer tool calls** — agent already has context, doesn't need to `find`/`grep`/`read`
+With `qmd-economy`:
+- **Zero or near-zero tool calls** — injected answer plans remove exploratory `find`/`grep`/`read` loops
 - **Higher quality** — knows architecture decisions, conventions, runbooks
-- **Faster responses** — less exploration, more direct answers
+- **Faster responses** — compact context produces direct answers instead of exploration
+- **Lower visible token usage** — concise fact cards reduce assistant output and follow-up prompts
 
 ## Output
 
 Results saved to `/tmp/pi-memctx-benchmark/results/`:
 
 - `*_baseline_r*.txt` — raw agent output without extensions
-- `*_full_r*.txt` — raw agent output with pi-memctx profile `full`
+- `*_qmd-economy_r*.txt` — raw agent output with pi-memctx profile `qmd-economy`
 - `*_metrics.json` — structured metrics per task/profile/repeat
 - `summary-<run-id>.jsonl` — machine-readable aggregate rows
 - `report-<run-id>.md` — human-readable report
@@ -64,4 +65,4 @@ Results saved to `/tmp/pi-memctx-benchmark/results/`:
 - The baseline uses `--no-extensions` so globally installed pi-memctx does not leak into the baseline.
 - The memctx run uses `--no-extensions -e <repo>` so only the local extension under test is loaded.
 - Profile config is isolated per run with `MEMCTX_CONFIG_PATH`.
-- Token counts are approximate visible tokens. Provider-side system/context/cache token usage requires provider/Pi usage instrumentation and is not included in this local script.
+- Visible token counts are approximate. Provider token usage is captured from Pi JSON usage events when the selected provider/model reports it; otherwise those fields may be zero.

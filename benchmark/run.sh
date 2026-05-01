@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx profile:full.
+# Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx qmd-economy.
 # Captures JSON-mode events so tool calls and provider token usage can be measured.
 #
 # Usage:
@@ -7,17 +7,17 @@
 #   bash benchmark/run.sh [base_dir]
 #
 # Optional env:
-#   BENCH_PROFILES="baseline full"   # default
-#   BENCH_REPEATS=2                  # default
-#   BENCH_PI_MODEL="provider/model"  # optional pass-through to pi --model
-#   BENCH_TIMEOUT=180                # seconds per task
+#   BENCH_PROFILES="baseline qmd-economy"  # default
+#   BENCH_REPEATS=2                         # default
+#   BENCH_PI_MODEL="provider/model"         # optional pass-through to pi --model
+#   BENCH_TIMEOUT=180                       # seconds per task
 
 set -euo pipefail
 
 BASE_DIR="${1:-/tmp/pi-memctx-benchmark}"
 RESULTS_DIR="$BASE_DIR/results"
 EXTENSION_PATH="$(cd "$(dirname "$0")/.." && pwd)"
-BENCH_PROFILES="${BENCH_PROFILES:-baseline full}"
+BENCH_PROFILES="${BENCH_PROFILES:-baseline qmd-economy}"
 BENCH_REPEATS="${BENCH_REPEATS:-2}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-180}"
 BENCH_RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -58,60 +58,6 @@ profile_config() {
   local profile="$1"
   local config_path="$2"
   case "$profile" in
-    full)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "full",
-  "baseProfile": "full",
-  "strict": true,
-  "retrieval": "strict",
-  "retrievalLatencyBudgetMs": 3000,
-  "autosave": "auto",
-  "autosaveQueueLowConfidence": false,
-  "llm": "first",
-  "autoSwitch": "all",
-  "autoBootstrap": "ask",
-  "startupDoctor": "full",
-  "toolFailureHints": true
-}
-JSON
-      ;;
-    auto)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "auto",
-  "baseProfile": "auto",
-  "strict": true,
-  "retrieval": "auto",
-  "retrievalLatencyBudgetMs": 1000,
-  "autosave": "auto",
-  "autosaveQueueLowConfidence": false,
-  "llm": "assist",
-  "autoSwitch": "all",
-  "autoBootstrap": "ask",
-  "startupDoctor": "light",
-  "toolFailureHints": true
-}
-JSON
-      ;;
-    low)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "low",
-  "baseProfile": "low",
-  "strict": false,
-  "retrieval": "fast",
-  "retrievalLatencyBudgetMs": 300,
-  "autosave": "off",
-  "autosaveQueueLowConfidence": false,
-  "llm": "off",
-  "autoSwitch": "cwd",
-  "autoBootstrap": "ask",
-  "startupDoctor": "off",
-  "toolFailureHints": false
-}
-JSON
-      ;;
     qmd-economy)
       cat > "$config_path" <<'JSON'
 {
@@ -135,25 +81,7 @@ JSON
 }
 JSON
       ;;
-    balanced)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "balanced",
-  "baseProfile": "balanced",
-  "strict": true,
-  "retrieval": "balanced",
-  "retrievalLatencyBudgetMs": 1000,
-  "autosave": "suggest",
-  "autosaveQueueLowConfidence": false,
-  "llm": "assist",
-  "autoSwitch": "all",
-  "autoBootstrap": "ask",
-  "startupDoctor": "light",
-  "toolFailureHints": true
-}
-JSON
-      ;;
-    *) echo "Unknown profile: $profile" >&2; return 1 ;;
+    *) echo "Unknown profile for benchmark: $profile (supported: baseline qmd-economy)" >&2; return 1 ;;
   esac
 }
 
@@ -389,7 +317,7 @@ PY
 cat <<HEADER
 
 ═══════════════════════════════════════════════════
-  pi-memctx Local Benchmark: baseline vs profiles
+  pi-memctx Local Benchmark: baseline vs qmd-economy
 ═══════════════════════════════════════════════════
 
 Base dir:     $BASE_DIR
@@ -418,7 +346,7 @@ write_report
 echo ""
 echo "Results JSONL: $SUMMARY_JSONL"
 echo "Report:       $SUMMARY_MD"
-echo "Raw JSONL:     $RESULTS_DIR/*_{baseline,full}_r*.jsonl"
-echo "Raw text:      $RESULTS_DIR/*_{baseline,full}_r*.txt"
+echo "Raw JSONL:     $RESULTS_DIR/*_r*.jsonl"
+echo "Raw text:      $RESULTS_DIR/*_r*.txt"
 echo ""
 cat "$SUMMARY_MD"

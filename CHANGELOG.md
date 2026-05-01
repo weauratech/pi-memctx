@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Updated README benchmark results for the `qmd-economy` profile with measured local latency, token, tool-call, and quality improvements.
+- Simplified benchmark defaults and docs to compare `baseline` against `qmd-economy` only.
 
 ## [0.6.0] - 2026-05-01
 
