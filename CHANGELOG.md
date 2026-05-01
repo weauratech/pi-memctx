@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+
+## [0.5.2] - 2026-05-01
+
 ### Fixed
 
 - Force the npmjs.com publish step to use Trusted Publishing OIDC instead of any inherited long-lived token.
+<!-- Automatically released from fix/force-npm-trusted-publishing-auth as a patch bump via #25. -->
 
 ## [0.5.1] - 2026-05-01
 
