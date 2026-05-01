@@ -146,7 +146,7 @@ jobs:
 
       - name: Install dependencies
         if: steps.version.outputs.release == 'true'
-        run: npm ci --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund
+        run: npm install --omit=optional --ignore-scripts --no-audit --no-fund
 
       - name: Apply automatic version bump
         if: steps.version.outputs.release == 'true' && steps.version.outputs.mode == 'auto'

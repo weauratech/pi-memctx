@@ -21,7 +21,7 @@ The merge to `main` runs `.github/workflows/release.yml`, which:
 2. bumps `package.json` and `package-lock.json` with `npm version --no-git-tag-version`;
 3. moves the `CHANGELOG.md` `Unreleased` notes into the new version section, or creates a release note from the merged PR;
 4. commits the release bump back to `main` and pushes the matching `vX.Y.Z` tag;
-5. installs dependencies deterministically with `npm ci --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund`;
+5. installs dependencies with `npm install --omit=optional --ignore-scripts --no-audit --no-fund`, allowing npm to refresh peer metadata from the lockfile before the release bump;
 6. runs `npm run ci`;
 7. extracts release notes from `CHANGELOG.md`;
 8. runs `npm pack --json` and generates a SHA-256 checksum for the tarball;
