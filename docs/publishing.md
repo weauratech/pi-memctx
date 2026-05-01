@@ -20,14 +20,15 @@ The merge to `main` runs `.github/workflows/release.yml`, which:
 1. detects the merged pull request branch;
 2. bumps `package.json` and `package-lock.json` with `npm version --no-git-tag-version`;
 3. moves the `CHANGELOG.md` `Unreleased` notes into the new version section, or creates a release note from the merged PR;
-4. commits the release bump back to `main` and pushes the matching `vX.Y.Z` tag;
-5. installs dependencies with `npm install --omit=optional --ignore-scripts --no-audit --no-fund`, allowing npm to refresh peer metadata from the lockfile before the release bump;
-6. runs `npm run ci`;
-7. extracts release notes from `CHANGELOG.md`;
-8. runs `npm pack --json` and generates a SHA-256 checksum for the tarball;
-9. publishes the tarball to npmjs.com with npm Trusted Publishing and provenance;
-10. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
-11. creates or updates the GitHub Release and uploads the tarball plus checksum.
+4. rewrites the README release badge to the exact `vX.Y.Z` being released, avoiding stale latest-release badge caches;
+5. commits the release bump back to `main` and pushes the matching `vX.Y.Z` tag;
+6. installs dependencies with `npm install --omit=optional --ignore-scripts --no-audit --no-fund`, allowing npm to refresh peer metadata from the lockfile before the release bump;
+7. runs `npm run ci`;
+8. extracts release notes from `CHANGELOG.md`;
+9. runs `npm pack --json` and generates a SHA-256 checksum for the tarball;
+10. publishes the tarball to npmjs.com with npm Trusted Publishing and provenance;
+11. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
+12. creates or updates the GitHub Release and uploads the tarball plus checksum.
 
 The workflow can also be run manually with a `vX.Y.Z` tag when the tag version already matches `package.json`. The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped.
 
