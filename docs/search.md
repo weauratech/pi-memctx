@@ -1,12 +1,24 @@
 # Search
 
-`memctx_search` searches the active memory pack. Automatic context injection also performs prompt-specific retrieval before each agent turn.
+`memctx_search` searches the active memory pack. Automatic context injection also performs prompt-specific retrieval before each agent turn using the configured retrieval policy.
 
-## Modes
+## Tool modes
 
 - `keyword`: fast default mode.
 - `semantic`: meaning-based search when qmd is installed.
 - `deep`: hybrid/reranked search when qmd is installed.
+
+## Automatic retrieval policies
+
+```txt
+/memctx-retrieval auto|fast|balanced|deep|strict|status
+```
+
+- `auto`: default; chooses a safe policy from strict/LLM/qmd state.
+- `fast`: one keyword query.
+- `balanced`: keyword plus LLM-expanded queries when available.
+- `deep`: multi-query retrieval with deeper qmd mode.
+- `strict`: always attempts expanded retrieval and reports attempted queries/cross-pack hints.
 
 qmd is resolved from `MEMCTX_QMD_BIN`, `PATH`, or the optional bundled `@tobilu/qmd` dependency. Without qmd, pi-memctx falls back to local grep-style Markdown search.
 

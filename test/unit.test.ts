@@ -836,6 +836,11 @@ describe("extension registration", () => {
 		expect(commands["memctx-pack-generate"]).toBeDefined();
 		expect(commands["pack-generate"]).toBeDefined();
 		expect(commands["pack-generate"].description).toContain("Deprecated alias");
+		expect(commands["memctx-retrieval"]).toBeDefined();
+		expect(commands["memctx-autosave"]).toBeDefined();
+		expect(commands["memctx-save-queue"]).toBeDefined();
+		expect(commands["memctx-doctor"]).toBeDefined();
+		expect(commands["memctx-pack-enrich"]).toBeDefined();
 	});
 });
 

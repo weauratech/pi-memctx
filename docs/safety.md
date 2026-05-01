@@ -40,3 +40,4 @@ Good memory notes include:
 - Do not persist sensitive data.
 - Prefer safe pointers to secret stores over copied credentials.
 - Keep context notes specific, dated, and reviewable.
+- Review autosave candidates before approving them, especially before sharing a pack.

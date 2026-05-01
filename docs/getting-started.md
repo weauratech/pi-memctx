@@ -71,6 +71,17 @@ Environment equivalents:
 ```bash
 MEMCTX_AUTO_SWITCH=off|cwd|prompt|all
 MEMCTX_LLM_MODE=off|assist|first
+MEMCTX_RETRIEVAL=auto|fast|balanced|deep|strict
+MEMCTX_AUTOSAVE=off|suggest|confirm|auto
+```
+
+Use stronger retrieval and memory capture when desired:
+
+```txt
+/memctx-retrieval strict
+/memctx-autosave suggest
+/memctx-save-queue
+/memctx-doctor
 ```
 
 Ask the agent to search memory:
