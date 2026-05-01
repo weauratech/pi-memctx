@@ -51,6 +51,6 @@ memctx-pack-generate
 - Bounded context: lower-priority sections are trimmed before flooding the prompt.
 - qmd optional: semantic search is attempted automatically when available, but grep fallback remains the hard guarantee.
 - Observable memory state: `/memctx-pack-status` reports active pack, qmd resolution, LLM mode, strict mode, retrieval policy, autosave mode, and last retrieval; the footer overlay includes current `memctx-strict`, `memctx-llm`, retrieval, and autosave values.
-- Strict guidance is opt-in via `MEMCTX_STRICT=true` or `/memctx-strict on`.
+- Strict guidance defaults to on. Disable with `MEMCTX_STRICT=false` or `/memctx-strict off` when lower retrieval pressure is preferred.
 - Source of truth wins: repository files and live system state override memory notes.
 - Generated memory is conservative: deterministic pack generation avoids destructive commands and redacts sensitive-looking values.

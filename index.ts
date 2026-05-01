@@ -72,7 +72,7 @@ let activePackPath = "";
 let qmdAvailable = false;
 let qmdBin = "";
 let qmdCollection = "";
-let strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
+let strictMode = parseStrictModeEnv(process.env.MEMCTX_STRICT);
 
 type SearchMode = "keyword" | "semantic" | "deep";
 type QmdSource = "env" | "path" | "local-dependency" | "missing";
@@ -154,8 +154,10 @@ let llmStats: LlmStats = {
 	estimatedOutputChars: 0,
 };
 
-function parseBooleanEnv(value: string | undefined): boolean {
-	return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
+function parseStrictModeEnv(value: string | undefined): boolean {
+	const normalized = (value ?? "on").toLowerCase();
+	if (["0", "false", "no", "off"].includes(normalized)) return false;
+	return true;
 }
 
 function parseAutoSwitchMode(value: string | undefined): AutoSwitchMode {
@@ -2076,7 +2078,7 @@ export function _resetState() {
 	qmdBin = "";
 	qmdStatus = { available: false, source: "missing" };
 	qmdCollection = "";
-	strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
+	strictMode = parseStrictModeEnv(process.env.MEMCTX_STRICT);
 	autoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
 	llmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 	retrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
@@ -2358,6 +2360,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui.notify(`memctx: Strict mode ${strictMode ? "on" : "off"}.`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
 		},
 	});
 

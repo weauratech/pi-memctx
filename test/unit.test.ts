@@ -842,6 +842,19 @@ describe("extension registration", () => {
 		expect(commands["memctx-doctor"]).toBeDefined();
 		expect(commands["memctx-pack-enrich"]).toBeDefined();
 	});
+
+	test("/memctx-strict updates the status overlay", async () => {
+		const { pi, commands } = createMockPi();
+		registerExtension(pi as any);
+		const ctx = createMockCtx();
+
+		await commands["memctx-strict"].handler("off", ctx);
+		expect(ctx.ui.setStatus).toHaveBeenCalled();
+		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("strict:off");
+
+		await commands["memctx-strict"].handler("on", ctx);
+		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("strict:on");
+	});
 });
 
 // ==========================================================================

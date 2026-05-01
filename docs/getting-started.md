@@ -53,10 +53,11 @@ See `examples/basic-pack/` for a minimal public-safe pack.
 
 Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
 
-Use strict mode when you want stronger retrieval guidance before project-specific answers:
+Strict mode is on by default for stronger retrieval guidance before project-specific answers. You can toggle it when needed:
 
 ```txt
 /memctx-strict on
+/memctx-strict off
 ```
 
 Configure automatic pack switching and LLM assistance:
