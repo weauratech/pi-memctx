@@ -88,19 +88,12 @@ jobs:
           shasum -a 256 "$FILE" > "$FILE.sha256"
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm with trusted publishing
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           if npm view "pi-memctx@$VERSION" version >/dev/null 2>&1; then
             echo "pi-memctx@$VERSION is already published on npm. Skipping publish."
-            exit 0
-          fi
-
-          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "NPM_TOKEN is not configured. Skipping npm publish; rerun this workflow after adding the secret."
             exit 0
           fi
 

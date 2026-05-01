@@ -17,21 +17,26 @@ Releases are tag-driven. Pushing a tag like `v0.3.0` runs `.github/workflows/rel
 4. extracts release notes from `CHANGELOG.md`;
 5. runs `npm pack --json`;
 6. generates a SHA-256 checksum for the tarball;
-7. publishes the tarball to npm when `NPM_TOKEN` is configured;
+7. publishes the tarball to npmjs.com with npm Trusted Publishing and provenance;
 8. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
 9. creates or updates the GitHub Release and uploads the tarball plus checksum.
 
-The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped. If `NPM_TOKEN` is not configured, the workflow still publishes the GitHub Packages mirror and creates/updates the GitHub Release; rerun it after adding the secret to publish to npmjs.com.
+The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped.
 
-## Required secret
+## npm Trusted Publishing
 
-Configure this GitHub Actions secret before publishing to npm:
+Publishing to npmjs.com uses [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers) instead of a long-lived npm automation token. Do not configure or use an `NPM_TOKEN` secret for npmjs.com publishing.
+
+Before the first trusted publish, configure the `pi-memctx` package on npmjs.com with a GitHub Actions trusted publisher:
 
 ```txt
-NPM_TOKEN
+Repository owner: weauratech
+Repository name: pi-memctx
+Workflow file: release.yml
+Environment: npm
 ```
 
-The workflow also requests `id-token: write` so the project can migrate to npm Trusted Publishing later.
+The release workflow requests `id-token: write` and runs `npm publish --provenance --access public`, which lets npm exchange the GitHub Actions OIDC identity for a short-lived publish credential.
 
 ## GitHub Packages mirror
 
