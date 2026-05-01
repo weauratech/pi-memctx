@@ -44,7 +44,7 @@ Workflow file: release.yml
 Environment: npm
 ```
 
-The release workflow requests `id-token: write`, upgrades to npm 11 for Trusted Publishing support, clears any long-lived npm auth token from the npmjs.com publish step, and runs `npm publish --provenance --access public`, which lets npm exchange the GitHub Actions OIDC identity for a short-lived publish credential.
+The release workflow requests `id-token: write`, runs the npmjs.com publish through npm 11 for Trusted Publishing support, clears any long-lived npm auth token from the publish step, and runs `npm publish --provenance --access public`, which lets npm exchange the GitHub Actions OIDC identity for a short-lived publish credential.
 
 ## GitHub Packages mirror
 

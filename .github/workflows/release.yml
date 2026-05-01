@@ -35,11 +35,6 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Upgrade npm for trusted publishing
-        run: |
-          npm install -g npm@11
-          npm --version
-
       - uses: oven-sh/setup-bun@v2
 
       - name: Configure git
@@ -260,7 +255,8 @@ jobs:
 
           npm config delete //registry.npmjs.org/:_authToken || true
           unset NODE_AUTH_TOKEN
-          npm publish "${{ steps.pack.outputs.file }}" --provenance --access public
+          npx --yes npm@11 --version
+          npx --yes npm@11 publish "${{ steps.pack.outputs.file }}" --provenance --access public
 
       - name: Publish to GitHub Packages
         if: steps.version.outputs.release == 'true'
