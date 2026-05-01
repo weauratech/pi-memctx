@@ -7,6 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.6.0] - 2026-05-01
+
+### Added
+
+- Added the `qmd-economy` profile for direct answer-plan context with lower provider-token use.
+- Added qmd-economy fact cards under `00-system/fact-cards/` for deploy, database, architecture, Terraform, and safety domains.
+- Added qmd search/vsearch/query-assisted fact-card enrichment with deterministic fallback.
+- Added progress notifications for `/memctx-pack-enrich` so long enrich runs are observable.
+
+### Changed
+
+- `/memctx-pack-enrich` can now run qmd-economy fact-card enrichment even when remote LLM mode is off.
+- Benchmark tooling supports the `qmd-economy` profile.
+
+<!-- Manually released after qmd-economy fact-card pipeline PR #31. -->
+
 ## [0.5.6] - 2026-05-01
 
 ### Fixed
