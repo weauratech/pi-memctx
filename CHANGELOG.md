@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Run the npmjs.com publish through npm 11 without replacing the runner's bundled npm.
 - Upgrade npm in the release workflow so Trusted Publishing OIDC authentication is supported.
 
 ## [0.5.2] - 2026-05-01
