@@ -9,19 +9,27 @@ pi install git:github.com/weauratech/pi-memctx
 
 ## Release workflow
 
-Releases are tag-driven. Pushing a tag like `v0.3.0` runs `.github/workflows/release.yml`, which:
+Releases are generated automatically when a pull request is merged to `main` with a release branch prefix:
 
-1. validates that the tag version matches `package.json`;
-2. installs dependencies with `npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false`;
-3. runs `npm run ci`;
-4. extracts release notes from `CHANGELOG.md`;
-5. runs `npm pack --json`;
-6. generates a SHA-256 checksum for the tarball;
-7. publishes the tarball to npmjs.com with npm Trusted Publishing and provenance;
-8. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
-9. creates or updates the GitHub Release and uploads the tarball plus checksum.
+- `feat/...` or `feature/...` creates a minor release;
+- `fix/...`, `bugfix/...`, or `hotfix/...` creates a patch release;
+- other branch prefixes run no release.
 
-The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped.
+The merge to `main` runs `.github/workflows/release.yml`, which:
+
+1. detects the merged pull request branch;
+2. bumps `package.json` and `package-lock.json` with `npm version --no-git-tag-version`;
+3. moves the `CHANGELOG.md` `Unreleased` notes into the new version section, or creates a release note from the merged PR;
+4. commits the release bump back to `main` and pushes the matching `vX.Y.Z` tag;
+5. installs dependencies with `npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false`;
+6. runs `npm run ci`;
+7. extracts release notes from `CHANGELOG.md`;
+8. runs `npm pack --json` and generates a SHA-256 checksum for the tarball;
+9. publishes the tarball to npmjs.com with npm Trusted Publishing and provenance;
+10. publishes a scoped mirror to GitHub Packages as `@weauratech/pi-memctx` using `GITHUB_TOKEN`;
+11. creates or updates the GitHub Release and uploads the tarball plus checksum.
+
+The workflow can also be run manually with a `vX.Y.Z` tag when the tag version already matches `package.json`. The publish steps are idempotent: if the version already exists on a registry, publishing to that registry is skipped.
 
 ## npm Trusted Publishing
 
@@ -66,17 +74,11 @@ pi install npm:pi-memctx
 1. Run `npm run ci`.
 2. Run `npm pack --dry-run --json` and inspect included files.
 3. Review `SECURITY.md` and ensure no sensitive data was committed.
-4. Update `CHANGELOG.md` with a section matching the release version, for example `## [0.3.0] - YYYY-MM-DD`.
-5. Update `package.json` and `package-lock.json` to the same version.
-6. Merge the release commit to `main`.
-7. Create and push the tag:
-
-```bash
-git checkout main
-git pull
-git tag v0.3.0
-git push origin v0.3.0
-```
+4. Add user-facing release notes under `## [Unreleased]` in `CHANGELOG.md`.
+5. Open the PR from a release branch prefix:
+   - `feat/...` for a minor release;
+   - `fix/...` for a patch release.
+6. Merge the PR to `main` with a merge commit so the release workflow can identify the source branch.
 
 ## Versioning
 
