@@ -1320,6 +1320,201 @@ function writeGeneratedFile(packPath: string, relPath: string, content: string, 
 	filesCreated.push(filePath);
 }
 
+type RepoFileInventoryItem = {
+	path: string;
+	size: number;
+	language: string;
+	imports: string[];
+	exports: string[];
+	symbols: string[];
+};
+
+type LlmFileSelection = {
+	files?: string[];
+	reasons?: Record<string, string>;
+};
+
+type LlmRepoSynthesis = {
+	summary?: string;
+	architecture?: string[];
+	entrypoints?: string[];
+	domains?: Array<{ name: string; responsibility: string; files: string[] }>;
+	integrations?: string[];
+	envVars?: string[];
+	risks?: string[];
+	testing?: string[];
+};
+
+function detectLanguage(rel: string): string {
+	const ext = path.extname(rel).toLowerCase();
+	if ([".ts", ".tsx"].includes(ext)) return "typescript";
+	if ([".js", ".jsx", ".mjs", ".cjs"].includes(ext)) return "javascript";
+	if (ext === ".go") return "go";
+	if (ext === ".py") return "python";
+	if ([".yml", ".yaml"].includes(ext)) return "yaml";
+	if (ext === ".json") return "json";
+	if (ext === ".md") return "markdown";
+	if (ext === ".tf") return "terraform";
+	return ext.replace(/^\./, "") || "text";
+}
+
+function collectRepoFileInventory(repoPath: string, limit = 180): RepoFileInventoryItem[] {
+	const candidates = findFilesLimited(repoPath, (rel, name) => {
+		if (rel.includes("/node_modules/") || SENSITIVE_FILE_RE.test(rel)) return false;
+		return /\.(ts|tsx|js|jsx|mjs|cjs|go|py|json|ya?ml|md|tf|dockerfile)$/i.test(name)
+			|| ["Dockerfile", "Makefile", "package.json", "go.mod", "compose.yml", "docker-compose.yml"].includes(name);
+	}, limit, 7);
+	return candidates.map((full) => {
+		const rel = path.relative(repoPath, full);
+		const content = readFileSafe(full) ?? "";
+		return {
+			path: rel,
+			size: Buffer.byteLength(content, "utf-8"),
+			language: detectLanguage(rel),
+			imports: [...content.matchAll(/^\s*import\s+.*?from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]).slice(0, 12),
+			exports: [...content.matchAll(/^\s*export\s+(?:default\s+)?(?:class|function|const|interface|type)\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]).slice(0, 20),
+			symbols: [...content.matchAll(/^\s*(?:class|function|const|interface|type|func)\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]).slice(0, 20),
+		};
+	}).sort((a, b) => {
+		const rank = (item: RepoFileInventoryItem) => /(^|\/)(package\.json|go\.mod|README\.md|AGENTS\.md|CLAUDE\.md|Dockerfile|docker-compose\.ya?ml)$/.test(item.path) ? 0 : item.path.split("/").length;
+		return rank(a) - rank(b) || a.path.localeCompare(b.path);
+	});
+}
+
+function extractImportantSnippet(repoPath: string, rel: string, maxChars = 5000): string {
+	const file = readEvidenceFile(path.join(repoPath, rel), repoPath, maxChars);
+	if (!file) return "";
+	const lines = file.content.split("\n");
+	const important = lines.filter((line, idx) => {
+		if (idx < 80) return true;
+		return /\b(import|export|class|function|interface|type|router|route|controller|service|process\.env|env\.|DATABASE|REDIS|STRIPE|JWT|AUTH|PORT)\b/i.test(line);
+	});
+	return truncate(important.join("\n"), maxChars);
+}
+
+async function selectImportantFilesWithLlm(repo: RepoEvidence, inventory: RepoFileInventoryItem[], ctx: ExtensionContext): Promise<string[]> {
+	const fallback = inventory.slice(0, 24).map((f) => f.path);
+	if (llmMode === "off" || !ctx.model || inventory.length === 0) return fallback;
+	const decision = await completeJsonWithLlm<LlmFileSelection>(ctx, "pack-generate-select-files", [
+		"Select the most important files for understanding a repository.",
+		"Prioritize architecture, entrypoints, API surface, data model, integrations, config, deployment, tests.",
+		"Return ONLY JSON: {\"files\":[...], \"reasons\":{\"path\":\"short reason\"}}. Max 24 files.",
+	].join("\n"), {
+		repo: { name: repo.name, type: repo.type, scripts: repo.scripts, tree: repo.tree.slice(0, 80) },
+		inventory: inventory.slice(0, 160),
+	});
+	const selected = (decision?.files ?? []).filter((f) => inventory.some((i) => i.path === f)).slice(0, 24);
+	return selected.length ? selected : fallback;
+}
+
+async function synthesizeRepoWithLlm(repo: RepoEvidence, selectedFiles: string[], ctx: ExtensionContext): Promise<LlmRepoSynthesis | null> {
+	if (llmMode === "off" || !ctx.model) return null;
+	const snippets = selectedFiles.map((file) => ({ file, snippet: extractImportantSnippet(repo.path, file, 3500) })).filter((f) => f.snippet.trim());
+	if (snippets.length === 0) return null;
+	return completeJsonWithLlm<LlmRepoSynthesis>(ctx, "pack-generate-synthesize-repo", [
+		"You synthesize durable memory-pack notes from redacted source evidence.",
+		"Only make claims supported by file evidence. Mention unknown when evidence is insufficient.",
+		"Return ONLY compact JSON with keys: summary, architecture[], entrypoints[], domains[], integrations[], envVars[], risks[], testing[].",
+		"Do not include secret values. Env var names are allowed; values are not.",
+	].join("\n"), {
+		repo: { name: repo.name, type: repo.type, path: repo.path, scripts: repo.scripts, safeCommands: repo.safeCommands },
+		files: snippets,
+	});
+}
+
+function llmArchitectureNote(packSlug: string, repo: RepoEvidence, synthesis: LlmRepoSynthesis, selectedFiles: string[], today: string): string {
+	const domains = synthesis.domains?.length
+		? synthesis.domains.map((d) => `| ${d.name} | ${d.responsibility} | ${d.files.map((f) => `\`${f}\``).join(", ")} |`).join("\n")
+		: "| unknown | Insufficient evidence. | - |";
+	return `---
+type: context-pack
+id: context.${packSlug}.${repo.slug}.llm-architecture
+title: ${repo.name} LLM Architecture
+status: active
+source_of_truth: false
+freshness: current
+last_reviewed: ${today}
+tags:
+  - pack/${packSlug}
+  - agent-memory/context-pack
+  - repo/${repo.slug}
+  - llm-generated
+---
+
+# ${repo.name} LLM Architecture
+
+Generated from redacted source evidence. Validate behavior against source files before making changes.
+
+## Summary
+
+${synthesis.summary || repo.description}
+
+## Key files analyzed
+
+${selectedFiles.map((f) => `- \`${f}\``).join("\n") || "- No files selected."}
+
+## Architecture
+
+${(synthesis.architecture?.length ? synthesis.architecture : repo.observations).map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
+
+## Entry points
+
+${(synthesis.entrypoints ?? []).map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
+
+## Domains
+
+| Domain | Responsibility | Evidence files |
+|---|---|---|
+${domains}
+
+## Integrations
+
+${(synthesis.integrations ?? []).map((x) => `- ${x}`).join("\n") || "- No high-confidence integrations identified."}
+
+## Environment variables referenced
+
+${(synthesis.envVars ?? []).map((x) => `- \`${x}\``).join("\n") || "- No environment variables identified from selected evidence."}
+
+## Risks and follow-ups
+
+${(synthesis.risks ?? []).map((x) => `- ${x}`).join("\n") || "- No specific risks identified from selected evidence."}
+
+## Testing notes
+
+${(synthesis.testing ?? []).map((x) => `- ${x}`).join("\n") || "- Inspect repository tests and CI before changing behavior."}
+
+## Related
+
+- [[packs/${packSlug}/20-context/${repo.slug}|${repo.name} context]]
+- [[packs/${packSlug}/00-system/indexes/context-index|Context Index]]
+`;
+}
+
+async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, packPath: string, ctx: ExtensionContext): Promise<string[]> {
+	const filesCreated: string[] = [];
+	const today = todayStr();
+	const repos = discoverRepositories(scanDir).filter((repo) => repo.status === "active").slice(0, 12);
+	const contextRows: string[] = [];
+	for (const repo of repos) {
+		const inventory = collectRepoFileInventory(repo.path);
+		const selected = await selectImportantFilesWithLlm(repo, inventory, ctx);
+		const synthesis = await synthesizeRepoWithLlm(repo, selected, ctx);
+		if (!synthesis) continue;
+		const rel = `20-context/${repo.slug}-llm-architecture.md`;
+		writeGeneratedFile(packPath, rel, llmArchitectureNote(packSlug, repo, synthesis, selected, today), filesCreated);
+		contextRows.push(`| [[packs/${packSlug}/20-context/${repo.slug}-llm-architecture|${repo.name} LLM Architecture]] | LLM-assisted architecture synthesized from selected source evidence. |`);
+	}
+	if (contextRows.length) {
+		const indexPath = path.join(packPath, "00-system/indexes/context-index.md");
+		const existing = readFileSafe(indexPath);
+		if (existing) {
+			fs.writeFileSync(indexPath, `${existing.trim()}\n${contextRows.join("\n")}\n`, "utf-8");
+			filesCreated.push(indexPath);
+		}
+	}
+	return filesCreated;
+}
+
 function repoContextNote(packSlug: string, repo: RepoEvidence, today: string): string {
 	const docs = repo.docs.slice(0, 8).map((d) => `### ${d.path}\n\n${d.content}`).join("\n\n");
 	const scripts = Object.keys(repo.scripts).length
@@ -2140,6 +2335,13 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`memctx: Scanning ${scanDir}...`, "info");
 
 			const { packPath, filesCreated } = generatePackFromDirectory(scanDir, slug, packsDir);
+			if (llmMode !== "off" && ctx.model) {
+				ctx.ui.notify(`memctx: Running LLM-assisted deep pack enrichment for "${slug}"...`, "info");
+				const enriched = await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx);
+				filesCreated.push(...enriched);
+			} else if (llmMode !== "off" && !ctx.model) {
+				ctx.ui.notify("memctx: LLM enrichment skipped because no model is selected.", "warning");
+			}
 
 			// Index with qmd if available
 			if (qmdAvailable) {
