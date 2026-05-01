@@ -33,7 +33,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-          registry-url: https://registry.npmjs.org
           cache: npm
 
       - uses: oven-sh/setup-bun@v2
@@ -254,6 +253,8 @@ jobs:
             exit 0
           fi
 
+          npm config delete //registry.npmjs.org/:_authToken || true
+          unset NODE_AUTH_TOKEN
           npm publish "${{ steps.pack.outputs.file }}" --provenance --access public
 
       - name: Publish to GitHub Packages
