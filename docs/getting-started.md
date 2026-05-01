@@ -26,7 +26,7 @@ Use `/pack-generate` inside a Pi session:
 /pack-generate /path/to/repos my-project
 ```
 
-The generator performs deterministic local discovery of repositories, read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints. See [Pack generation](pack-generate.md).
+The generator performs deterministic local discovery of repositories, read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints. When `MEMCTX_LLM_MODE` is enabled and a model is selected, it also performs LLM-assisted deep enrichment from selected redacted source snippets. See [Pack generation](pack-generate.md).
 
 Or create folders manually:
 
@@ -55,6 +55,20 @@ Use strict mode when you want stronger retrieval guidance before project-specifi
 
 ```txt
 /memctx-strict on
+```
+
+Configure automatic pack switching and LLM assistance:
+
+```txt
+/memctx-auto-switch all
+/memctx-llm first
+```
+
+Environment equivalents:
+
+```bash
+MEMCTX_AUTO_SWITCH=off|cwd|prompt|all
+MEMCTX_LLM_MODE=off|assist|first
 ```
 
 Ask the agent to search memory:

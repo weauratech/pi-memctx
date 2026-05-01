@@ -8,9 +8,11 @@
 
 If no path is provided, pi-memctx scans the current working directory. If no slug is provided, it derives one from the scanned directory name.
 
-## Deterministic discovery
+## Hybrid discovery and LLM enrichment
 
-The generator performs local-only discovery and writes a structured pack before any future LLM enrichment step. It detects:
+The generator first performs deterministic local discovery so pack structure is always created even when no model is available. When `MEMCTX_LLM_MODE` is `assist` or `first` and a Pi model is selected, `/pack-generate` then runs token-conscious LLM enrichment.
+
+The local deterministic pass detects:
 
 - normal top-level repositories;
 - hidden repository allowlist entries such as `.github` and `.gitlab`;
@@ -20,6 +22,37 @@ The generator performs local-only discovery and writes a structured pack before 
 - infrastructure/config hints such as Docker, Terraform, Helm, Kubernetes, `infra/`, and CI workflows;
 - read-first docs such as `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and selected `docs/**/*.md` files;
 - safe development commands from package scripts, Go manifests, and Make targets.
+
+## LLM-assisted deep enrichment
+
+When LLM enrichment is enabled, pi-memctx:
+
+1. builds a compact file inventory per active repository;
+2. asks the selected model to choose the highest-value files for architecture/API/data-model/integration understanding;
+3. extracts redacted snippets only from those selected files;
+4. asks the model to synthesize compact JSON;
+5. writes evidence-based architecture notes such as `20-context/<repo>-llm-architecture.md`;
+6. appends those notes to `00-system/indexes/context-index.md`.
+
+Token controls:
+
+- file inventory is metadata-first;
+- selected files are capped;
+- snippets are truncated;
+- sensitive filenames are skipped;
+- high-confidence secret-looking values are redacted before model use.
+
+Disable LLM use with:
+
+```bash
+MEMCTX_LLM_MODE=off
+```
+
+Prefer stronger LLM usage with:
+
+```bash
+MEMCTX_LLM_MODE=first
+```
 
 ## Generated structure
 
@@ -33,6 +66,7 @@ The generated pack uses the full memory-pack layout:
 10-user/
 20-context/overview.md
 20-context/<repo>.md
+20-context/<repo>-llm-architecture.md   # when LLM enrichment runs
 30-projects/<repo>.md
 40-actions/
 50-decisions/
@@ -49,6 +83,6 @@ The generator skips sensitive file names such as `.env`, private keys, credentia
 
 Generated notes are context, not authority. Source-of-truth repository files, tests, CI, and live runtime facts override memory.
 
-## Current limitation
+## Current limitations
 
-This phase is deterministic. LLM-assisted synthesis and `/pack-enrich` are planned as follow-up phases so generated notes can be further summarized without overwriting human-authored memory.
+LLM enrichment is intentionally evidence-bounded: it summarizes selected redacted snippets and should not be treated as source of truth. If no model is selected or no API key is available, `/pack-generate` still produces the deterministic pack and skips LLM enrichment with a warning.
