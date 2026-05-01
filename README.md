@@ -68,14 +68,17 @@ Agent: Based on your deploy runbook:
 
 Run `bash benchmark/setup.sh && bash benchmark/run.sh` to measure on your own project.
 
-Typical results across 5 common tasks:
+Latest local benchmark (`baseline` vs `qmd-economy`, 5 tasks, 1 repeat):
 
-| Metric | Without | With pi-memctx | Gain |
-|---|---|---|---|
-| Tool calls per task | ~6 | ~1 | **80% fewer** |
-| Correct facts in response | ~40% | ~95% | **2.4× better** |
-| Time to answer | ~30s | ~5s | **6× faster** |
-| Follow-up prompts needed | ~3 | ~0 | **First-pass accuracy** |
+| Metric | Baseline | qmd-economy | Gain |
+|---|---:|---:|---:|
+| Avg time to answer | 23.9s | 4.4s | **5.4× faster** |
+| Tool calls per task | 7.0 | 0.0 | **100% fewer** |
+| Quality facts found | 14/22 | 22/22 | **100% coverage** |
+| Provider tokens/task | 2,453 | 1,950 | **20% fewer** |
+| Visible tokens/task* | 545 | 175 | **68% fewer** |
+
+*Visible tokens are approximated from prompt + assistant text chars / 4. `qmd-economy` injects compact answer plans from qmd-backed fact cards, so the agent answers directly instead of exploring files or calling `memctx_search` for already-supported project questions.
 
 ### What this means for your team
 
@@ -266,7 +269,7 @@ These slash commands are available inside Pi after the extension loads.
 
 | Command | Usage | What |
 |---|---|---|
-| `/memctx-profile` | `/memctx-profile auto\|low\|balanced\|full\|status` | Apply a zero-config behavior profile. Default is `auto`. |
+| `/memctx-profile` | `/memctx-profile qmd-economy\|auto\|status` | Apply a zero-config behavior profile. Default is `auto`; `qmd-economy` is recommended for lowest tool/token usage. |
 | `/memctx-config` | `/memctx-config status\|reset` | Inspect or reset persistent config in `~/.config/pi-memctx/config.json`. |
 | `/memctx-pack` | `/memctx-pack` or `/memctx-pack <name>` | List packs with a picker or switch directly. |
 | `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, profile/config, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
@@ -285,25 +288,27 @@ Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, 
 ### `/memctx-pack-status` example
 
 ```txt
-Profile: auto
+Profile: qmd-economy
 Config path: ~/.config/pi-memctx/config.json
 Active pack: opensource
 Pack path: ~/.pi/agent/memory-vault/packs/opensource
 Auto-switch: cwd
-Retrieval policy: auto
-Retrieval budget: 1000ms
-Autosave: suggest
+Retrieval policy: fast
+Retrieval budget: 250ms
+Context pipeline: qmd-economy
+Context budget: 650 tokens
+Autosave: off
 Autosave low-confidence queue: off
 Save queue: 0 pending
 Selection: high (112)
 Last switch: none
 qmd: available
 qmd source: local-dependency
-Strict mode: on
-LLM mode: assist
+Strict mode: off
+LLM mode: off
 LLM calls: 0
-Overlay: 📦 opensource · profile:auto · qmd:3 · retrieval:auto · save:auto · strict:on · llm:assist
-Last retrieval: qmd
+Overlay: 📦 opensource · profile:qmd-economy · qmd:3 · ctx:650 · retrieval:fast · save:off · strict:off · llm:off
+Last retrieval: qmd-economy
 ```
 
 ### `/memctx-pack-generate` discovery
@@ -324,12 +329,11 @@ cd ~/code/my-infra     # → loads "infra" pack
 cd ~/code              # → loads org-level pack
 ```
 
-For most users, no setup is needed: `profile:auto` is applied by default. Switch profile when you want different trade-offs:
+For most users, no setup is needed: `profile:auto` is applied by default. Switch to `qmd-economy` when you want the lowest tool/token usage for project Q&A:
 
 ```txt
-/memctx-profile low       # low latency/cost
-/memctx-profile balanced  # review memory candidates
-/memctx-profile full      # maximum retrieval/LLM usage
+/memctx-profile qmd-economy  # compact qmd-backed answer plans, no autosave/LLM, fast retrieval
+/memctx-profile auto         # default general-purpose behavior
 ```
 
 Switch mid-session with `/memctx-pack`, or enable prompt-based switching:
@@ -372,9 +376,11 @@ Measure the impact on your own project:
 # Setup fictional test scenario
 bash benchmark/setup.sh
 
-# Run 5 tasks with and without pi-memctx
+# Run 5 tasks: baseline vs qmd-economy
 bash benchmark/run.sh
 ```
+
+Recent run (`20260501-180558`): `qmd-economy` answered all 5 tasks with **0 tool calls**, **22/22 quality facts**, **4.4s avg latency**, and **~175 visible tokens/task**. Baseline averaged 7 tool calls, 14/22 quality facts, 23.9s latency, and ~545 visible tokens/task.
 
 ## Documentation
 
