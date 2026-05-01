@@ -1,16 +1,18 @@
 # Pack generation
 
-`/pack-generate` creates a memory pack from a directory of repositories.
+`/memctx-pack-generate` creates a memory pack from a directory of repositories.
 
 ```txt
-/pack-generate /path/to/repos my-project
+/memctx-pack-generate /path/to/repos my-project
 ```
+
+`/pack-generate` remains available as a deprecated compatibility alias.
 
 If no path is provided, pi-memctx scans the current working directory. If no slug is provided, it derives one from the scanned directory name.
 
 ## Hybrid discovery and LLM enrichment
 
-The generator first performs deterministic local discovery so pack structure is always created even when no model is available. When `MEMCTX_LLM_MODE` is `assist` or `first` and a Pi model is selected, `/pack-generate` then runs token-conscious LLM enrichment.
+The generator first performs deterministic local discovery so pack structure is always created even when no model is available. When `MEMCTX_LLM_MODE` is `assist` or `first` and a Pi model is selected, `/memctx-pack-generate` then runs token-conscious LLM enrichment.
 
 The local deterministic pass detects:
 
@@ -85,4 +87,4 @@ Generated notes are context, not authority. Source-of-truth repository files, te
 
 ## Current limitations
 
-LLM enrichment is intentionally evidence-bounded: it summarizes selected redacted snippets and should not be treated as source of truth. If no model is selected or no API key is available, `/pack-generate` still produces the deterministic pack and skips LLM enrichment with a warning.
+LLM enrichment is intentionally evidence-bounded: it summarizes selected redacted snippets and should not be treated as source of truth. If no model is selected or no API key is available, `/memctx-pack-generate` still produces the deterministic pack and skips LLM enrichment with a warning.

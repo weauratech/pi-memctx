@@ -20,10 +20,10 @@ pi-memctx looks for packs in this order:
 
 ## Create a pack
 
-Use `/pack-generate` inside a Pi session:
+Use `/memctx-pack-generate` inside a Pi session:
 
 ```txt
-/pack-generate /path/to/repos my-project
+/memctx-pack-generate /path/to/repos my-project
 ```
 
 The generator performs deterministic local discovery of repositories, read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints. When `MEMCTX_LLM_MODE` is enabled and a model is selected, it also performs LLM-assisted deep enrichment from selected redacted source snippets. See [Pack generation](pack-generate.md).
@@ -46,10 +46,12 @@ See `examples/basic-pack/` for a minimal public-safe pack.
 ## Use a pack
 
 ```txt
-/pack
-/pack my-project
-/pack-status
+/memctx-pack
+/memctx-pack my-project
+/memctx-pack-status
 ```
+
+Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
 
 Use strict mode when you want stronger retrieval guidance before project-specific answers:
 

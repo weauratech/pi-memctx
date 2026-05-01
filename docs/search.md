@@ -27,4 +27,4 @@ pi-memctx attempts to use qmd automatically:
 3. `node_modules/.bin/qmd` from the optional bundled dependency
 4. grep fallback
 
-Use `/pack-status` to see which path is active.
+Use `/memctx-pack-status` to see which path is active. `/pack-status` remains available as a deprecated compatibility alias.
