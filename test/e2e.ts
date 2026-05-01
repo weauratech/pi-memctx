@@ -108,8 +108,10 @@ async function main() {
 
 	assert(!!tools.memctx_search, "memctx_search tool registered");
 	assert(!!tools.memctx_save, "memctx_save tool registered");
-	assert(!!commands.pack, "/pack command registered");
-	assert(!!commands["pack-generate"], "/pack-generate command registered");
+	assert(!!commands["memctx-pack"], "/memctx-pack command registered");
+	assert(!!commands.pack, "/pack deprecated alias registered");
+	assert(!!commands["memctx-pack-generate"], "/memctx-pack-generate command registered");
+	assert(!!commands["pack-generate"], "/pack-generate deprecated alias registered");
 	assert(!!hooks.session_start, "session_start hook registered");
 	assert(!!hooks.before_agent_start, "before_agent_start hook registered");
 	assert(!!hooks.session_before_compact, "session_before_compact hook registered");

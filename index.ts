@@ -22,7 +22,7 @@ import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
 // ---------------------------------------------------------------------------
@@ -589,9 +589,7 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}` : "idle";
-	const strict = strictMode ? " strict" : "";
-	const llm = llmMode !== "off" ? ` llm:${llmStats.callsThisSession}` : "";
-	return `📦 ${activePack || "none"} · ${retrieval}${strict}${llm}`;
+	return `📦 ${activePack || "none"} · ${retrieval} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
 export async function searchPackMemory(
@@ -2109,10 +2107,10 @@ export default function (pi: ExtensionAPI) {
 		// Nothing to flush at the moment
 	});
 
-	// --- /pack-status command: show active pack and retrieval state ---
-	pi.registerCommand("pack-status", {
-		description: "Show active memory pack, qmd, retrieval, and strict-mode status.",
-		handler: async (_args, ctx) => {
+	// --- /memctx-pack-status command: show active pack and retrieval state ---
+	const packStatusCommand = {
+		description: "Show active memory pack, qmd, retrieval, strict-mode, and LLM status. Usage: /memctx-pack-status",
+		handler: async (_args: string, ctx: ExtensionContext) => {
 			const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
 			const packFileCount = activePackPath ? scanPackFiles(activePackPath).length : 0;
 			const retrieval = lastRetrieval
@@ -2157,6 +2155,11 @@ export default function (pi: ExtensionAPI) {
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
 		},
+	};
+	pi.registerCommand("memctx-pack-status", packStatusCommand);
+	pi.registerCommand("pack-status", {
+		...packStatusCommand,
+		description: "Deprecated alias for /memctx-pack-status.",
 	});
 
 	// --- /memctx-strict command: toggle strict memory gate ---
@@ -2209,13 +2212,13 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- /pack command: list and switch packs ---
-	pi.registerCommand("pack", {
-		description: "List or switch memory packs. Usage: /pack [name]",
-		handler: async (args, ctx) => {
+	// --- /memctx-pack command: list and switch packs ---
+	const packCommand = {
+		description: "List or switch memory packs. Usage: /memctx-pack [name]",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const packsDir = _packsDir || resolvePacksDir(ctx.cwd);
 			if (!packsDir) {
-				ctx.ui.notify("memctx: No packs found. Use /pack-generate to create one.", "error");
+				ctx.ui.notify("memctx: No packs found. Use /memctx-pack-generate to create one.", "error");
 				return;
 			}
 
@@ -2249,7 +2252,7 @@ export default function (pi: ExtensionAPI) {
 				activePack = packName;
 				activePackPath = path.join(packsDir, packName);
 				qmdCollection = `memctx-${packName}`;
-				lastPackSwitch = { from, to: packName, reason: "manual /pack selection", confidence: "high", timestamp: nowTimestamp() };
+				lastPackSwitch = { from, to: packName, reason: "manual /memctx-pack selection", confidence: "high", timestamp: nowTimestamp() };
 
 				if (qmdAvailable) {
 					qmdEmbed(qmdCollection, activePackPath).catch(() => {});
@@ -2275,7 +2278,7 @@ export default function (pi: ExtensionAPI) {
 			activePack = target;
 			activePackPath = path.join(packsDir, target);
 			qmdCollection = `memctx-${target}`;
-			lastPackSwitch = { from, to: target, reason: "manual /pack argument", confidence: "high", timestamp: nowTimestamp() };
+			lastPackSwitch = { from, to: target, reason: "manual /memctx-pack argument", confidence: "high", timestamp: nowTimestamp() };
 
 			if (qmdAvailable) {
 				qmdEmbed(qmdCollection, activePackPath).catch(() => {});
@@ -2284,12 +2287,17 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
+	};
+	pi.registerCommand("memctx-pack", packCommand);
+	pi.registerCommand("pack", {
+		...packCommand,
+		description: "Deprecated alias for /memctx-pack.",
 	});
 
-	// --- /pack-generate command: generate a pack from a directory ---
-	pi.registerCommand("pack-generate", {
-		description: "Generate a memory pack from a directory of repos. Usage: /pack-generate [path] [slug]",
-		handler: async (args, ctx) => {
+	// --- /memctx-pack-generate command: generate a pack from a directory ---
+	const packGenerateCommand = {
+		description: "Generate a memory pack from a directory of repos. Usage: /memctx-pack-generate [path] [slug]",
+		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			// Resolve packs directory — create default if none exists
 			let packsDir = _packsDir;
 			if (!packsDir) {
@@ -2363,6 +2371,11 @@ export default function (pi: ExtensionAPI) {
 			lastPackSwitch = { from: "", to: slug, reason: "generated new pack", confidence: "high", timestamp: nowTimestamp() };
 			ctx.ui.setStatus("memctx", buildStatusText());
 		},
+	};
+	pi.registerCommand("memctx-pack-generate", packGenerateCommand);
+	pi.registerCommand("pack-generate", {
+		...packGenerateCommand,
+		description: "Deprecated alias for /memctx-pack-generate.",
 	});
 
 	// --- memctx_search tool ---
@@ -2420,7 +2433,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const hint = crossResults.length > 0
-					? "\n\nTry switching pack: " + crossResults.map((p) => "/pack " + p).join(", ")
+					? "\n\nTry switching pack: " + crossResults.map((p) => "/memctx-pack " + p).join(", ")
 					: "";
 
 				return {

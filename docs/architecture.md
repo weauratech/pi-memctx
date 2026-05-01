@@ -29,7 +29,7 @@ memctx_save
 session_before_compact
   -> write a compact handoff action note
 
-pack-generate
+memctx-pack-generate
   -> discover repositories under the target directory
   -> collect sanitized evidence from docs, manifests, workflows, git, and safe command sources
   -> write full pack structure, resource map, context notes, project notes, observations, runbooks, and indexes
@@ -41,7 +41,7 @@ pack-generate
 - Markdown-first: memory is reviewable with normal tools.
 - Bounded context: lower-priority sections are trimmed before flooding the prompt.
 - qmd optional: semantic search is attempted automatically when available, but grep fallback remains the hard guarantee.
-- Observable memory state: `/pack-status` reports active pack, qmd resolution, and last retrieval.
+- Observable memory state: `/memctx-pack-status` reports active pack, qmd resolution, LLM mode, strict mode, and last retrieval; the footer overlay includes current `memctx-strict` and `memctx-llm` values.
 - Strict guidance is opt-in via `MEMCTX_STRICT=true` or `/memctx-strict on`.
 - Source of truth wins: repository files and live system state override memory notes.
 - Generated memory is conservative: deterministic pack generation avoids destructive commands and redacts sensitive-looking values.

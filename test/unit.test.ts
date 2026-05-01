@@ -813,22 +813,29 @@ describe("extension registration", () => {
 		expect(hooks["session_shutdown"]).toBeDefined();
 	});
 
-	test("registers /pack command", () => {
+	test("registers /memctx-pack command and deprecated /pack alias", () => {
 		const { pi, commands } = createMockPi();
 		registerExtension(pi as any);
 
+		expect(commands["memctx-pack"]).toBeDefined();
+		expect(commands["memctx-pack"].description).toContain("switch");
 		expect(commands["pack"]).toBeDefined();
-		expect(commands["pack"].description).toContain("switch");
+		expect(commands["pack"].description).toContain("Deprecated alias");
 	});
 
-	test("registers /pack-status and /memctx-strict commands", () => {
+	test("registers /memctx-pack-status and /memctx-strict commands", () => {
 		const { pi, commands } = createMockPi();
 		registerExtension(pi as any);
 
+		expect(commands["memctx-pack-status"]).toBeDefined();
+		expect(commands["memctx-pack-status"].description).toContain("status");
 		expect(commands["pack-status"]).toBeDefined();
-		expect(commands["pack-status"].description).toContain("status");
+		expect(commands["pack-status"].description).toContain("Deprecated alias");
 		expect(commands["memctx-strict"]).toBeDefined();
 		expect(commands["memctx-strict"].description).toContain("strict");
+		expect(commands["memctx-pack-generate"]).toBeDefined();
+		expect(commands["pack-generate"]).toBeDefined();
+		expect(commands["pack-generate"].description).toContain("Deprecated alias");
 	});
 });
 
