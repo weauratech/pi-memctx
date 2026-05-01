@@ -12,7 +12,7 @@
   <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/github/stars/weauratech/pi-memctx?style=flat&color=yellow" alt="Stars"></a>
   <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
-  <a href="package.json"><img src="https://img.shields.io/github/package-json/v/weauratech/pi-memctx?style=flat" alt="Version"></a>
+  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/github/v/release/weauratech/pi-memctx?style=flat" alt="Latest Release"></a>
 </p>
 
 <p align="center">

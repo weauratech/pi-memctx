@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Switched npm release publishing from `NPM_TOKEN` to npm Trusted Publishing with provenance.
+
 ## [0.4.0] - 2026-05-01
 
 ### Added

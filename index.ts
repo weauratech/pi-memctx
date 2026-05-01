@@ -83,6 +83,7 @@ type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
 type MemctxProfile = "low" | "balanced" | "auto" | "full" | "custom";
 type AutoBootstrapMode = "off" | "ask" | "on";
 type StartupDoctorMode = "off" | "light" | "full";
+type ContextMode = "raw" | "compact";
 type Confidence = "none" | "low" | "medium" | "high";
 
 type PackMatch = {
@@ -130,6 +131,10 @@ type RetrievalStatus = {
 	durationMs: number;
 	budgetMs: number;
 	timedOut: boolean;
+	contextChars?: number;
+	contextEstimatedTokens?: number;
+	contextBudgetTokens?: number;
+	contextMode?: ContextMode;
 	timestamp: string;
 };
 
@@ -158,6 +163,10 @@ type MemctxConfig = {
 	autoBootstrap: AutoBootstrapMode;
 	startupDoctor: StartupDoctorMode;
 	toolFailureHints: boolean;
+	contextMode: ContextMode;
+	contextTokenBudget: number;
+	contextMaxItems: number;
+	contextStripMetadata: boolean;
 };
 
 let currentProfile: MemctxProfile = "auto";
@@ -165,6 +174,10 @@ let baseProfile: Exclude<MemctxProfile, "custom"> = "auto";
 let autoBootstrapMode: AutoBootstrapMode = "ask";
 let startupDoctorMode: StartupDoctorMode = "light";
 let toolFailureHints = true;
+let contextMode: ContextMode = parseContextMode(process.env.MEMCTX_CONTEXT_MODE);
+let contextTokenBudget = parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, 1200);
+let contextMaxItems = parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6);
+let contextStripMetadata = parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA);
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
@@ -192,6 +205,10 @@ function parseBooleanDefaultFalse(value: string | undefined): boolean {
 	return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
 }
 
+function parseBooleanDefaultTrue(value: string | undefined): boolean {
+	return !["0", "false", "no", "off"].includes((value ?? "true").toLowerCase());
+}
+
 function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
 	const parsed = Number.parseInt(value ?? "", 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -217,6 +234,11 @@ function parseAutosaveMode(value: string | undefined): AutosaveMode {
 	return ["off", "suggest", "confirm", "auto"].includes(normalized) ? normalized as AutosaveMode : "suggest";
 }
 
+function parseContextMode(value: string | undefined): ContextMode {
+	const normalized = (value ?? "compact").toLowerCase();
+	return ["raw", "compact"].includes(normalized) ? normalized as ContextMode : "compact";
+}
+
 function parseAutoBootstrapMode(value: string | undefined): AutoBootstrapMode {
 	const normalized = (value ?? "ask").toLowerCase();
 	return ["off", "ask", "on"].includes(normalized) ? normalized as AutoBootstrapMode : "ask";
@@ -234,10 +256,10 @@ function memctxConfigPath(): string {
 
 function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
 	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
-		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false },
-		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true },
-		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true },
-		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true },
+		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 1200, contextMaxItems: 12, contextStripMetadata: true },
+		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1700, contextMaxItems: 16, contextStripMetadata: true },
+		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1400, contextMaxItems: 14, contextStripMetadata: true },
+		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 2200, contextMaxItems: 20, contextStripMetadata: true },
 	};
 	return { ...base[profile], baseProfile: profile };
 }
@@ -279,11 +301,15 @@ function applyMemctxConfig(config: MemctxConfig) {
 	autoBootstrapMode = envOrConfig(process.env.MEMCTX_AUTO_BOOTSTRAP, parseAutoBootstrapMode(process.env.MEMCTX_AUTO_BOOTSTRAP), config.autoBootstrap);
 	startupDoctorMode = envOrConfig(process.env.MEMCTX_STARTUP_DOCTOR, parseStartupDoctorMode(process.env.MEMCTX_STARTUP_DOCTOR), config.startupDoctor);
 	toolFailureHints = envOrConfig(process.env.MEMCTX_TOOL_FAILURE_HINTS, parseBooleanDefaultFalse(process.env.MEMCTX_TOOL_FAILURE_HINTS), config.toolFailureHints);
+	contextMode = envOrConfig(process.env.MEMCTX_CONTEXT_MODE, parseContextMode(process.env.MEMCTX_CONTEXT_MODE), config.contextMode);
+	contextTokenBudget = envOrConfig(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_TOKEN_BUDGET, 1200), config.contextTokenBudget);
+	contextMaxItems = envOrConfig(process.env.MEMCTX_CONTEXT_MAX_ITEMS, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6), config.contextMaxItems);
+	contextStripMetadata = envOrConfig(process.env.MEMCTX_CONTEXT_STRIP_METADATA, parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA), config.contextStripMetadata);
 	llmStats.mode = llmMode;
 }
 
 function currentMemctxConfig(profile: MemctxProfile = currentProfile): MemctxConfig {
-	return { profile, baseProfile, strict: strictMode, retrieval: retrievalPolicy, retrievalLatencyBudgetMs, autosave: autosaveMode, autosaveQueueLowConfidence, llm: llmMode, autoSwitch: autoSwitchMode, autoBootstrap: autoBootstrapMode, startupDoctor: startupDoctorMode, toolFailureHints };
+	return { profile, baseProfile, strict: strictMode, retrieval: retrievalPolicy, retrievalLatencyBudgetMs, autosave: autosaveMode, autosaveQueueLowConfidence, llm: llmMode, autoSwitch: autoSwitchMode, autoBootstrap: autoBootstrapMode, startupDoctor: startupDoctorMode, toolFailureHints, contextMode, contextTokenBudget, contextMaxItems, contextStripMetadata };
 }
 
 function persistCurrentConfig(profile: MemctxProfile = currentProfile) {
@@ -736,7 +762,8 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
-	return `📦 ${activePack || "none"} · profile:${currentProfile} · ${retrieval} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+	const ctxBudget = `${contextMode}:${contextTokenBudget}t`;
+	return `📦 ${activePack || "none"} · profile:${currentProfile} · ${retrieval} · ctx:${ctxBudget} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
 function isNoResultText(text: string): boolean {
@@ -930,157 +957,210 @@ export function truncate(text: string, maxChars: number, from: "start" | "end" |
 	}
 }
 
+
+function estimateTokens(text: string): number {
+	return Math.ceil(text.length / 4);
+}
+
+function stripMarkdownMetadata(content: string): string {
+	let text = content.replace(/^---\s*\n[\s\S]*?\n---\s*/m, "");
+	text = text.replace(/^tags:\s*[\s\S]*?(?=^\S|\Z)/gim, "");
+	text = text.replace(/\[\[([^|\]]+)\|([^\]]+)\]\]/g, "$2");
+	text = text.replace(/\[\[([^\]]+)\]\]/g, "$1");
+	text = text.replace(/<!--([\s\S]*?)-->/g, "");
+	return text.trim();
+}
+
+function normalizeContextLine(line: string): string {
+	return line
+		.replace(/\s+/g, " ")
+		.replace(/`([^`]{1,80})`/g, "`$1`")
+		.trim();
+}
+
+function compactMarkdown(content: string, maxChars: number): string {
+	const source = contextStripMetadata ? stripMarkdownMetadata(content) : content.trim();
+	const lines = source.split("\n");
+	const picked: string[] = [];
+	let inFence = false;
+	let fenceLines = 0;
+	for (const raw of lines) {
+		const line = normalizeContextLine(raw);
+		if (!line) continue;
+		if (line.startsWith("```")) {
+			inFence = !inFence;
+			fenceLines = 0;
+			continue;
+		}
+		if (inFence) {
+			// Keep only compact command/schema hints from code fences.
+			if (fenceLines++ > 8) continue;
+			if (/^(cd |npm |pnpm |bun |go |make |terragrunt |kubectl |curl |CREATE TABLE|resource |variable )/i.test(line) || /\b(GitHub Actions|docker|ECR|Helm|ArgoCD|Kubernetes|Push to main|syncs?)\b/i.test(line)) picked.push(`- ${line}`);
+			continue;
+		}
+		if (/^#+\s+/.test(line)) {
+			const title = line.replace(/^#+\s+/, "");
+			if (!/^related$/i.test(title)) picked.push(`${picked.length ? "\n" : ""}${line}`);
+			continue;
+		}
+		if (/^[-*]\s+/.test(line) || /^\d+\.\s+/.test(line)) {
+			picked.push(line);
+			continue;
+		}
+		if (line.includes("|") && !/^\|?\s*-+/.test(line)) {
+			picked.push(line.startsWith("|") ? line : `- ${line}`);
+			continue;
+		}
+		if (/:/.test(line) || /\b(uses?|requires?|deploy|safe|dangerous|architecture|database|framework|runtime|module|approval|append-only|immutable|integer cents)\b/i.test(line)) {
+			picked.push(line.startsWith("-") ? line : `- ${line}`);
+			continue;
+		}
+		if (line.length <= 160 && !/^related$/i.test(line)) {
+			picked.push(`- ${line}`);
+		}
+		if (picked.join("\n").length > maxChars * 1.4) break;
+	}
+	const compact = picked.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+	return truncate(compact || source, maxChars);
+}
+
+function compactSearchResults(text: string, maxChars: number): string {
+	if (!text.trim()) return "";
+	const normalized = stripMarkdownMetadata(text)
+		.split("\n")
+		.map(normalizeContextLine)
+		.filter((line) => line && !/^qmd:\/\//.test(line))
+		.filter((line) => !/^[-=]{3,}$/.test(line))
+		.join("\n");
+	return compactMarkdown(normalized, maxChars);
+}
+
+function buildContextItem(packPath: string, filePath: string, maxChars: number): string | null {
+	const content = readFileSafe(filePath);
+	if (!content?.trim()) return null;
+	if (content.includes("<Add wikilink>") && !content.includes("[[packs/")) return null;
+	const rel = path.relative(packPath, filePath);
+	const compact = contextMode === "raw"
+		? truncate(contextStripMetadata ? stripMarkdownMetadata(content) : content.trim(), maxChars)
+		: compactMarkdown(content, maxChars);
+	if (!compact.trim()) return null;
+	return `### ${rel}\n${compact}`;
+}
+
+function pushContextItems(
+	sections: { key: string; header: string; content: string }[],
+	key: string,
+	header: string,
+	packPath: string,
+	files: string[],
+	remainingItems: () => number,
+	itemBudget: number,
+) {
+	const items: string[] = [];
+	for (const file of files) {
+		if (remainingItems() - items.length <= 0) break;
+		const item = buildContextItem(packPath, file, itemBudget);
+		if (item) items.push(item);
+	}
+	if (items.length > 0) sections.push({ key, header, content: items.join("\n\n") });
+}
+
 /**
  * Build prioritized context from a pack for injection into the system prompt.
  */
 export function buildPackContext(packPath: string, searchResults?: string): string {
+	if (!fs.existsSync(packPath)) return "";
 	const sections: { key: string; header: string; content: string }[] = [];
+	const totalBudgetChars = Math.max(1200, contextTokenBudget * 4);
+	const searchBudgetChars = Math.min(Math.floor(totalBudgetChars * 0.35), 1800);
+	const itemBudget = contextMode === "raw" ? 1400 : 900;
+	let usedItems = 0;
+	const remainingItems = () => Math.max(0, contextMaxItems - usedItems);
+	const addSection = (section: { key: string; header: string; content: string }) => {
+		if (!section.content.trim()) return;
+		usedItems += Math.max(1, section.content.split("\n### ").length);
+		sections.push(section);
+	};
 
-	// 1. Manifest (highest priority) — skip empty template indexes
-	const manifestDir = path.join(packPath, "00-system");
-	if (fs.existsSync(manifestDir)) {
-		const manifestFiles = scanPackFiles(manifestDir);
-		const manifestParts: string[] = [];
-		for (const f of manifestFiles) {
-			const content = readFileSafe(f);
-			if (!content?.trim()) continue;
-			// Skip empty template indexes (contain only "<Add wikilink>")
-			if (content.includes("<Add wikilink>") && !content.includes("[[packs/")) continue;
-			const rel = path.relative(packPath, f);
-			manifestParts.push(`### ${rel}\n${content.trim()}`);
-		}
-		if (manifestParts.length > 0) {
-			sections.push({
-				key: "manifest",
-				header: "## Pack System (manifest, indexes, retrieval protocol)",
-				content: truncate(manifestParts.join("\n\n"), BUDGET.manifest),
-			});
-		}
+	// 1. Search results are most relevant to the current prompt; keep them compact.
+	if (searchResults?.trim()) {
+		addSection({
+			key: "searchResults",
+			header: "## Relevant Memory (compact search results)",
+			content: compactSearchResults(searchResults, searchBudgetChars),
+		});
 	}
 
-	// 2. Source-of-truth pointers (context packs)
+	// 2. Source-of-truth context notes: overview/architecture first, then newest.
 	const contextDir = path.join(packPath, "20-context");
-	if (fs.existsSync(contextDir)) {
+	if (fs.existsSync(contextDir) && remainingItems() > 0) {
 		const contextFiles = scanPackFiles(contextDir).sort((a, b) => {
 			const rank = (file: string) => {
 				const rel = path.relative(contextDir, file);
 				if (rel === "overview.md") return 0;
+				if (rel.includes("capsule")) return 0;
 				if (rel.includes("llm-architecture")) return 1;
 				if (rel.includes("architecture")) return 2;
 				return 3;
 			};
-			return rank(a) - rank(b);
+			return rank(a) - rank(b) || path.basename(a).localeCompare(path.basename(b));
 		});
-		const contextParts: string[] = [];
-		for (const f of contextFiles.slice(0, 5)) {
-			const content = readFileSafe(f);
-			if (content?.trim()) {
-				const rel = path.relative(packPath, f);
-				contextParts.push(`### ${rel}\n${content.trim()}`);
-			}
-		}
-		if (contextParts.length > 0) {
-			sections.push({
-				key: "sourceOfTruth",
-				header: "## Context Packs (source-of-truth pointers)",
-				content: truncate(contextParts.join("\n\n"), BUDGET.sourceOfTruth),
-			});
-		}
+		const before = sections.length;
+		pushContextItems(sections, "sourceOfTruth", "## Context Packs (compact)", packPath, contextFiles, remainingItems, itemBudget);
+		if (sections.length > before) usedItems += Math.max(1, sections.at(-1)!.content.split("\n### ").length);
 	}
 
-	// 3. Search results
-	if (searchResults?.trim()) {
-		sections.push({
-			key: "searchResults",
-			header: "## Relevant Memory (search results)",
-			content: truncate(searchResults, BUDGET.searchResults),
-		});
-	}
-
-	// 4. Recent actions
-	const actionsDir = path.join(packPath, "40-actions");
-	if (fs.existsSync(actionsDir)) {
-		const actionFiles = scanPackFiles(actionsDir).slice(0, 5);
-		const actionParts: string[] = [];
-		for (const f of actionFiles) {
-			const content = readFileSafe(f);
-			if (content?.trim()) {
-				const rel = path.relative(packPath, f);
-				actionParts.push(`### ${rel}\n${content.trim()}`);
-			}
-		}
-		if (actionParts.length > 0) {
-			sections.push({
-				key: "recentActions",
-				header: "## Recent Actions",
-				content: truncate(actionParts.join("\n\n"), BUDGET.recentActions),
-			});
-		}
-	}
-
-	// 5. Active decisions
+	// 3. Decisions preserve architectural/database conventions.
 	const decisionsDir = ["50-decisions", "30-decisions"]
 		.map((d) => path.join(packPath, d))
 		.find((d) => fs.existsSync(d));
-	if (decisionsDir) {
-		const decisionFiles = scanPackFiles(decisionsDir).slice(0, 5);
-		const decisionParts: string[] = [];
-		for (const f of decisionFiles) {
-			const content = readFileSafe(f);
-			if (content?.trim()) {
-				const rel = path.relative(packPath, f);
-				decisionParts.push(`### ${rel}\n${content.trim()}`);
-			}
-		}
-		if (decisionParts.length > 0) {
-			sections.push({
-				key: "decisions",
-				header: "## Active Decisions",
-				content: truncate(decisionParts.join("\n\n"), BUDGET.decisions),
-			});
-		}
+	if (decisionsDir && remainingItems() > 0) {
+		const before = sections.length;
+		pushContextItems(sections, "decisions", "## Active Decisions (compact)", packPath, scanPackFiles(decisionsDir).sort(), remainingItems, itemBudget);
+		if (sections.length > before) usedItems += Math.max(1, sections.at(-1)!.content.split("\n### ").length);
 	}
 
-	// 6. Runbooks
+	// 4. Runbooks often carry exact procedures and safety rules.
 	const runbooksDir = ["70-runbooks", "80-runbooks"]
 		.map((d) => path.join(packPath, d))
 		.find((d) => fs.existsSync(d));
-	if (runbooksDir) {
-		const runbookFiles = scanPackFiles(runbooksDir).slice(0, 3);
-		const runbookParts: string[] = [];
-		for (const f of runbookFiles) {
-			const content = readFileSafe(f);
-			if (content?.trim()) {
-				const rel = path.relative(packPath, f);
-				runbookParts.push(`### ${rel}\n${content.trim()}`);
-			}
-		}
-		if (runbookParts.length > 0) {
-			sections.push({
-				key: "runbooks",
-				header: "## Runbooks",
-				content: truncate(runbookParts.join("\n\n"), BUDGET.runbooks),
-			});
-		}
+	if (runbooksDir && remainingItems() > 0) {
+		const before = sections.length;
+		pushContextItems(sections, "runbooks", "## Runbooks (compact)", packPath, scanPackFiles(runbooksDir).sort(), remainingItems, itemBudget);
+		if (sections.length > before) usedItems += Math.max(1, sections.at(-1)!.content.split("\n### ").length);
 	}
 
-	// Apply total budget — trim from lowest priority
+	// 5. Recent actions are helpful but often verbose; include only when budget remains.
+	const actionsDir = path.join(packPath, "40-actions");
+	if (fs.existsSync(actionsDir) && remainingItems() > 0 && contextTokenBudget >= 1000) {
+		const before = sections.length;
+		pushContextItems(sections, "recentActions", "## Recent Actions (compact)", packPath, scanPackFiles(actionsDir), remainingItems, 700);
+		if (sections.length > before) usedItems += Math.max(1, sections.at(-1)!.content.split("\n### ").length);
+	}
+
+	// 6. System manifest/resource map last; indexes are useful but low-value for token economy.
+	const manifestDir = path.join(packPath, "00-system");
+	if (fs.existsSync(manifestDir) && remainingItems() > 0) {
+		const manifestFiles = scanPackFiles(manifestDir)
+			.filter((f) => !path.relative(packPath, f).includes(`${path.sep}indexes${path.sep}`))
+			.sort((a, b) => path.relative(packPath, a).localeCompare(path.relative(packPath, b)));
+		const before = sections.length;
+		pushContextItems(sections, "manifest", "## Pack System (compact)", packPath, manifestFiles, remainingItems, Math.min(itemBudget, 700));
+		if (sections.length > before) usedItems += Math.max(1, sections.at(-1)!.content.split("\n### ").length);
+	}
+
 	const result: string[] = [];
 	let totalChars = 0;
-
 	for (const section of sections) {
 		const sectionText = `${section.header}\n\n${section.content}`;
-		if (totalChars + sectionText.length > BUDGET.total) {
-			const remaining = BUDGET.total - totalChars;
-			if (remaining > 200) {
-				result.push(truncate(sectionText, remaining));
-			}
+		if (totalChars + sectionText.length > totalBudgetChars) {
+			const remaining = totalBudgetChars - totalChars;
+			if (remaining > 200) result.push(truncate(sectionText, remaining));
 			break;
 		}
 		result.push(sectionText);
 		totalChars += sectionText.length;
 	}
-
 	return result.join("\n\n");
 }
 
@@ -2424,6 +2504,9 @@ export default function (pi: ExtensionAPI) {
 			retrievalTimedOut = retrieval.timedOut;
 		}
 
+		const packContext = buildPackContext(activePackPath, searchResults);
+		if (!packContext) return;
+
 		lastRetrieval = {
 			prompt: truncate(event.prompt ?? "", 200),
 			mode: retrievalMode,
@@ -2435,18 +2518,19 @@ export default function (pi: ExtensionAPI) {
 			durationMs: retrievalDurationMs,
 			budgetMs: retrievalBudgetMs,
 			timedOut: retrievalTimedOut,
+			contextChars: packContext.length,
+			contextEstimatedTokens: estimateTokens(packContext),
+			contextBudgetTokens: contextTokenBudget,
+			contextMode,
 			timestamp: nowTimestamp(),
 		};
-
-		const packContext = buildPackContext(activePackPath, searchResults);
-		if (!packContext) return;
 
 		const memoryGate = [
 			"## Memory Gate",
 			"For project-specific questions:",
 			"1. Use the loaded memory context first.",
-			"2. If relevant facts may exist outside the injected context, call memctx_search before answering.",
-			"3. If memory is insufficient or conflicts with source files, inspect source-of-truth files.",
+			"2. Prefer the loaded compact memory; call memctx_search only when the loaded context is missing, ambiguous, or likely stale.",
+			"3. Inspect source-of-truth files only when memory is insufficient, conflicts with files, or the user asks for current file state.",
 			"4. If you discover durable safe knowledge, save or suggest saving it with memctx_save.",
 			"5. Never save secrets, credentials, private keys, tokens, customer data, or sensitive payloads.",
 			strictMode
@@ -2458,10 +2542,11 @@ export default function (pi: ExtensionAPI) {
 			"\n\n## Memory Context",
 			`Active pack: \`${activePack}\``,
 			`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"}; policy: ${retrievalPolicy})`,
+			`Context budget: ${contextMode}, ~${estimateTokens(packContext)}/${contextTokenBudget} tokens, ${contextMaxItems} max items`,
 			retrievalQueries.length ? `Queries attempted: ${retrievalQueries.map((q) => `\`${q}\``).join(", ")}` : "Queries attempted: none",
 			crossPackHits.length ? `Cross-pack hints: ${crossPackHits.join(", ")}` : "",
 			"The following memory context has been loaded from the pack.",
-			"Use the memctx_search tool to find additional context across pack files.",
+			"Use memctx_search only when the compact context is insufficient; avoid redundant source exploration when memory already answers the prompt.",
 			"",
 			memoryGate,
 			"",
@@ -2558,6 +2643,7 @@ export default function (pi: ExtensionAPI) {
 					`  queries: ${lastRetrieval.queries.join(" | ") || "<none>"}`,
 					`  results: ${lastRetrieval.resultCount}`,
 					`  duration: ${lastRetrieval.durationMs}ms / ${lastRetrieval.budgetMs}ms${lastRetrieval.timedOut ? " (budget reached)" : ""}`,
+					`  context: ${lastRetrieval.contextMode ?? contextMode}, ~${lastRetrieval.contextEstimatedTokens ?? 0}/${lastRetrieval.contextBudgetTokens ?? contextTokenBudget} tokens (${lastRetrieval.contextChars ?? 0} chars)`,
 					`  cross-pack hits: ${lastRetrieval.crossPackHits.join(", ") || "<none>"}`,
 					`  at: ${lastRetrieval.timestamp}`,
 				]
@@ -2581,6 +2667,7 @@ export default function (pi: ExtensionAPI) {
 				`Auto-switch: ${autoSwitchMode}`,
 				`Retrieval policy: ${retrievalPolicy}`,
 				`Retrieval budget: ${retrievalLatencyBudgetMs}ms`,
+				`Context: ${contextMode}, budget ~${contextTokenBudget} tokens, max items ${contextMaxItems}, strip metadata ${contextStripMetadata ? "on" : "off"}`,
 				`Autosave: ${autosaveMode}`,
 				`Autosave low-confidence queue: ${autosaveQueueLowConfidence ? "on" : "off"}`,
 				`Save queue: ${readSaveQueue().length} pending`,
