@@ -271,8 +271,8 @@ These slash commands are available inside Pi after the extension loads.
 | `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. Defaults to `on`; project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
 | `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
 | `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching, retrieval expansion, autosave candidates, and pack generation. |
-| `/memctx-retrieval` | `/memctx-retrieval auto\|fast\|balanced\|deep\|strict\|status` | Configure automatic retrieval depth. `auto` is the default. |
-| `/memctx-autosave` | `/memctx-autosave off\|suggest\|confirm\|auto\|status` | Configure memory candidate capture after meaningful turns. |
+| `/memctx-retrieval` | `/memctx-retrieval auto\|fast\|balanced\|deep\|strict\|status` | Configure automatic retrieval depth. `auto` is the default and is latency-bounded. |
+| `/memctx-autosave` | `/memctx-autosave off\|suggest\|confirm\|auto\|status` | Configure memory candidate capture. `auto` saves high-confidence candidates without queue approval by default. |
 | `/memctx-save-queue` | `/memctx-save-queue list\|approve <id>\|reject <id>\|clear` | Review queued memory candidates. |
 | `/memctx-doctor` | `/memctx-doctor` | Diagnose active pack, qmd, retrieval, autosave, placeholders, duplicate note slugs, and secret-scan warnings. |
 | `/memctx-pack-enrich` | `/memctx-pack-enrich [source-dir]` | LLM-enrich an existing active pack from source evidence. |
@@ -287,7 +287,9 @@ Active pack: opensource
 Pack path: ~/.pi/agent/memory-vault/packs/opensource
 Auto-switch: cwd
 Retrieval policy: auto
+Retrieval budget: 1000ms
 Autosave: suggest
+Autosave low-confidence queue: off
 Save queue: 0 pending
 Selection: high (112)
 Last switch: none
@@ -331,10 +333,12 @@ For more aggressive memory behavior:
 
 ```txt
 /memctx-retrieval strict      # more retrieval attempts before each turn
-/memctx-autosave suggest     # queue memory candidates after meaningful work
-/memctx-save-queue           # review pending candidates
+/memctx-autosave auto        # save high-confidence candidates automatically
+/memctx-save-queue           # review pending candidates, if any
 /memctx-doctor               # diagnose pack/runtime health
 ```
+
+`retrieval:auto` does not imply full strict retrieval; it performs bounded retrieval with a default 1000ms latency budget. Use `/memctx-retrieval strict` when you explicitly prefer depth over latency.
 
 Switch mid-session with `/memctx-pack`.
 

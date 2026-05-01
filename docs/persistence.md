@@ -26,7 +26,7 @@
 /memctx-save-queue list|approve <id>|reject <id>|clear
 ```
 
-`autosave=suggest` queues candidates and shows a widget. `autosave=auto` only writes directly when confidence is high; otherwise candidates remain reviewable.
+`autosave=suggest` queues candidates and shows a widget. `autosave=confirm` asks immediately. `autosave=auto` writes directly when confidence is high and discards low-confidence candidates by default, so it does not require queue approval. Set `MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=true` to queue low-confidence auto candidates for review.
 
 ## Limitations
 
