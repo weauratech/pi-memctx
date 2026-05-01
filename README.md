@@ -146,14 +146,15 @@ pi starts → detect pack for cwd → load context
                                       │
 user sends prompt ────────────────────┤
                                       │
-  1. Search pack for relevant memories (qmd when available, grep fallback otherwise)
+  1. Search pack for relevant memories (policy-driven qmd/grep retrieval)
   2. Build prioritized context (manifest → context → search → actions → decisions → runbooks)
   3. Inject into system prompt (16K char budget)
                                       │
 agent responds ───────────────────────┤
                                       │
   4. Agent can save learnings (memctx_save)
-  5. Session handoff captured on compaction
+  5. Autosave can queue high-value memory candidates
+  6. Session handoff captured on compaction
 ```
 
 ### Context priority
@@ -269,7 +270,12 @@ These slash commands are available inside Pi after the extension loads.
 | `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
 | `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. In strict mode, project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
 | `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
-| `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching and pack generation. |
+| `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching, retrieval expansion, autosave candidates, and pack generation. |
+| `/memctx-retrieval` | `/memctx-retrieval auto\|fast\|balanced\|deep\|strict\|status` | Configure automatic retrieval depth. `auto` is the default. |
+| `/memctx-autosave` | `/memctx-autosave off\|suggest\|confirm\|auto\|status` | Configure memory candidate capture after meaningful turns. |
+| `/memctx-save-queue` | `/memctx-save-queue list\|approve <id>\|reject <id>\|clear` | Review queued memory candidates. |
+| `/memctx-doctor` | `/memctx-doctor` | Diagnose active pack, qmd, retrieval, autosave, placeholders, duplicate note slugs, and secret-scan warnings. |
+| `/memctx-pack-enrich` | `/memctx-pack-enrich [source-dir]` | LLM-enrich an existing active pack from source evidence. |
 | `/memctx-pack-generate` | `/memctx-pack-generate [path] [slug]` | Generate a structured pack from a directory of repositories, with optional LLM deep enrichment. |
 
 Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
@@ -280,6 +286,9 @@ Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, 
 Active pack: opensource
 Pack path: ~/.pi/agent/memory-vault/packs/opensource
 Auto-switch: cwd
+Retrieval policy: auto
+Autosave: suggest
+Save queue: 0 pending
 Selection: high (112)
 Last switch: none
 qmd: available
@@ -287,7 +296,7 @@ qmd source: local-dependency
 Strict mode: off
 LLM mode: assist
 LLM calls: 0
-Overlay: 📦 opensource · qmd:3 · strict:off · llm:assist
+Overlay: 📦 opensource · qmd:3 · retrieval:auto · save:suggest · strict:off · llm:assist
 Last retrieval: qmd
 ```
 
@@ -317,6 +326,15 @@ Switch mid-session with `/memctx-pack`, or enable prompt-based switching:
 ```
 
 `assist` mode uses deterministic matching first and asks the LLM for ambiguous prompt decisions. `first` mode asks the LLM whenever possible while keeping deterministic validation/fallbacks.
+
+For more aggressive memory behavior:
+
+```txt
+/memctx-retrieval strict      # more retrieval attempts before each turn
+/memctx-autosave suggest     # queue memory candidates after meaningful work
+/memctx-save-queue           # review pending candidates
+/memctx-doctor               # diagnose pack/runtime health
+```
 
 Switch mid-session with `/memctx-pack`.
 

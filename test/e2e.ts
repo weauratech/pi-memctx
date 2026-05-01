@@ -112,6 +112,11 @@ async function main() {
 	assert(!!commands.pack, "/pack deprecated alias registered");
 	assert(!!commands["memctx-pack-generate"], "/memctx-pack-generate command registered");
 	assert(!!commands["pack-generate"], "/pack-generate deprecated alias registered");
+	assert(!!commands["memctx-retrieval"], "/memctx-retrieval command registered");
+	assert(!!commands["memctx-autosave"], "/memctx-autosave command registered");
+	assert(!!commands["memctx-save-queue"], "/memctx-save-queue command registered");
+	assert(!!commands["memctx-doctor"], "/memctx-doctor command registered");
+	assert(!!commands["memctx-pack-enrich"], "/memctx-pack-enrich command registered");
 	assert(!!hooks.session_start, "session_start hook registered");
 	assert(!!hooks.before_agent_start, "before_agent_start hook registered");
 	assert(!!hooks.session_before_compact, "session_before_compact hook registered");

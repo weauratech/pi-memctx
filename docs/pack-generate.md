@@ -85,6 +85,10 @@ The generator skips sensitive file names such as `.env`, private keys, credentia
 
 Generated notes are context, not authority. Source-of-truth repository files, tests, CI, and live runtime facts override memory.
 
+## Enriching an existing pack
+
+Use `/memctx-pack-enrich [source-dir]` to rerun the LLM-assisted enrichment for the active pack without regenerating the entire pack. If `source-dir` is omitted, pi-memctx tries the source directory recorded in the pack resource map.
+
 ## Current limitations
 
 LLM enrichment is intentionally evidence-bounded: it summarizes selected redacted snippets and should not be treated as source of truth. If no model is selected or no API key is available, `/memctx-pack-generate` still produces the deterministic pack and skips LLM enrichment with a warning.

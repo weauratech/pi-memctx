@@ -78,6 +78,8 @@ type SearchMode = "keyword" | "semantic" | "deep";
 type QmdSource = "env" | "path" | "local-dependency" | "missing";
 type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
 type LlmMode = "off" | "assist" | "first";
+type RetrievalPolicy = "auto" | "fast" | "balanced" | "deep" | "strict";
+type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
 type Confidence = "none" | "low" | "medium" | "high";
 
 type PackMatch = {
@@ -118,14 +120,31 @@ type RetrievalStatus = {
 	prompt: string;
 	mode: "qmd" | "grep-fallback" | "none";
 	query: string;
+	queries: string[];
+	policy: RetrievalPolicy;
 	resultCount: number;
+	crossPackHits: string[];
 	timestamp: string;
+};
+
+type MemoryCandidate = {
+	id: string;
+	type: NoteType;
+	title: string;
+	content: string;
+	tags: string[];
+	confidence: number;
+	reason: string;
+	createdAt: string;
+	pack: string;
 };
 
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
 let llmMode: LlmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
+let retrievalPolicy: RetrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
+let autosaveMode: AutosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
 let lastPackSelection: PackMatch | null = null;
 let lastPackSwitch: PackSwitch | null = null;
 let llmStats: LlmStats = {
@@ -147,6 +166,16 @@ function parseAutoSwitchMode(value: string | undefined): AutoSwitchMode {
 function parseLlmMode(value: string | undefined): LlmMode {
 	const normalized = (value ?? "assist").toLowerCase();
 	return ["off", "assist", "first"].includes(normalized) ? normalized as LlmMode : "assist";
+}
+
+function parseRetrievalPolicy(value: string | undefined): RetrievalPolicy {
+	const normalized = (value ?? "auto").toLowerCase();
+	return ["auto", "fast", "balanced", "deep", "strict"].includes(normalized) ? normalized as RetrievalPolicy : "auto";
+}
+
+function parseAutosaveMode(value: string | undefined): AutosaveMode {
+	const normalized = (value ?? "suggest").toLowerCase();
+	return ["off", "suggest", "confirm", "auto"].includes(normalized) ? normalized as AutosaveMode : "suggest";
 }
 
 function confidenceForScore(score: number): Confidence {
@@ -589,7 +618,7 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}` : "idle";
-	return `📦 ${activePack || "none"} · ${retrieval} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+	return `📦 ${activePack || "none"} · ${retrieval} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
 export async function searchPackMemory(
@@ -614,6 +643,64 @@ export async function searchPackMemory(
 	}
 
 	return { text: "", mode: "none", matchCount: 0 };
+}
+
+type QueryExpansion = { queries?: string[] };
+
+async function buildRetrievalQueries(prompt: string, ctx: ExtensionContext, policy: RetrievalPolicy): Promise<string[]> {
+	const sanitized = prompt.replace(/[^\w\s.,?!/-]/g, "").slice(0, 300).trim();
+	if (!sanitized) return [];
+	const effective = policy === "auto" ? (strictMode ? "strict" : llmMode === "off" ? "fast" : "balanced") : policy;
+	if (effective === "fast") return [sanitized];
+	if (llmMode === "off" || !ctx.model) return [sanitized];
+	const decision = await completeJsonWithLlm<QueryExpansion>(ctx, "retrieval-query-expansion", [
+		"Generate compact memory search queries for a coding-agent memory pack.",
+		"Return ONLY JSON: {\"queries\":[...]} with 2-5 short queries. Include exact project/repo terms from the prompt.",
+	].join("\n"), { prompt: sanitized, activePack, policy: effective });
+	const expanded = (decision?.queries ?? [])
+		.map((q) => q.replace(/[^\w\s.,?!/-]/g, "").slice(0, 180).trim())
+		.filter(Boolean);
+	return [...new Set([sanitized, ...expanded])].slice(0, effective === "deep" || effective === "strict" ? 5 : 3);
+}
+
+function crossPackHitsForQuery(query: string, limit = 5): string[] {
+	const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
+	if (!packsDir) return [];
+	const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+	const hits: string[] = [];
+	for (const pack of listPacks(packsDir)) {
+		if (pack === activePack) continue;
+		const packPath = path.join(packsDir, pack);
+		for (const file of scanPackFiles(packPath).slice(0, 80)) {
+			const content = readFileSafe(file)?.toLowerCase();
+			if (!content) continue;
+			if (terms.some((term) => term.length > 2 && content.includes(term))) {
+				hits.push(pack);
+				break;
+			}
+		}
+		if (hits.length >= limit) break;
+	}
+	return hits;
+}
+
+async function retrieveForPrompt(prompt: string, ctx: ExtensionContext): Promise<{ text: string; mode: RetrievalStatus["mode"]; count: number; query: string; queries: string[]; crossPackHits: string[] }> {
+	const queries = await buildRetrievalQueries(prompt, ctx, retrievalPolicy);
+	const effective = retrievalPolicy === "auto" ? (strictMode ? "strict" : llmMode === "off" ? "fast" : "balanced") : retrievalPolicy;
+	const mode: SearchMode = effective === "deep" || effective === "strict" ? "deep" : "keyword";
+	const parts: string[] = [];
+	let finalMode: RetrievalStatus["mode"] = "none";
+	let count = 0;
+	for (const query of queries) {
+		const result = await searchPackMemory(activePackPath, query, effective === "fast" ? 3 : 5, mode);
+		if (result.matchCount > 0) {
+			parts.push(`### Query: ${query}\n${result.text}`);
+			finalMode = result.mode;
+			count += result.matchCount;
+		}
+	}
+	const crossPackHits = count === 0 && queries[0] ? crossPackHitsForQuery(queries[0]) : [];
+	return { text: parts.join("\n\n"), mode: finalMode, count, query: queries[0] ?? "", queries, crossPackHits };
 }
 
 /**
@@ -707,7 +794,16 @@ export function buildPackContext(packPath: string, searchResults?: string): stri
 	// 2. Source-of-truth pointers (context packs)
 	const contextDir = path.join(packPath, "20-context");
 	if (fs.existsSync(contextDir)) {
-		const contextFiles = scanPackFiles(contextDir);
+		const contextFiles = scanPackFiles(contextDir).sort((a, b) => {
+			const rank = (file: string) => {
+				const rel = path.relative(contextDir, file);
+				if (rel === "overview.md") return 0;
+				if (rel.includes("llm-architecture")) return 1;
+				if (rel.includes("architecture")) return 2;
+				return 3;
+			};
+			return rank(a) - rank(b);
+		});
 		const contextParts: string[] = [];
 		for (const f of contextFiles.slice(0, 5)) {
 			const content = readFileSafe(f);
@@ -950,6 +1046,59 @@ ${content}
 
 - [[packs/${packSlug}/00-system/pi-agent/memory-manifest|Memory Manifest]]
 `;
+}
+
+const SAVE_QUEUE_DIR = path.join(process.env.HOME ?? process.env.USERPROFILE ?? ".", ".cache", "pi-memctx");
+const SAVE_QUEUE_PATH = path.join(SAVE_QUEUE_DIR, "save-queue.json");
+
+function sensitivePatternHit(title: string, content: string): boolean {
+	const sensitivePatterns = [
+		/(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)\s*[:=]/i,
+		/(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/,
+		/(?:AKIA[0-9A-Z]{16})/,
+		/(?:ghp_[a-zA-Z0-9]{36})/,
+		/(?:sk-[a-zA-Z0-9]{40,})/,
+	];
+	return sensitivePatterns.some((pattern) => pattern.test(content) || pattern.test(title));
+}
+
+function readSaveQueue(): MemoryCandidate[] {
+	try {
+		const raw = readFileSafe(SAVE_QUEUE_PATH);
+		if (!raw) return [];
+		const parsed = JSON.parse(raw);
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
+function writeSaveQueue(queue: MemoryCandidate[]) {
+	fs.mkdirSync(SAVE_QUEUE_DIR, { recursive: true });
+	fs.writeFileSync(SAVE_QUEUE_PATH, JSON.stringify(queue.slice(-100), null, 2) + "\n", "utf-8");
+}
+
+function enqueueMemoryCandidate(candidate: MemoryCandidate) {
+	const queue = readSaveQueue();
+	const duplicate = queue.some((item) => item.pack === candidate.pack && slugify(item.title) === slugify(candidate.title));
+	if (!duplicate) writeSaveQueue([...queue, candidate]);
+}
+
+function saveMemoryCandidate(candidate: MemoryCandidate): { rel: string; action: "created" | "updated" } {
+	if (!activePackPath || !activePack) throw new Error("No active memory pack");
+	if (sensitivePatternHit(candidate.title, candidate.content)) throw new Error("Candidate appears to contain secrets");
+	const noteDir = resolveNoteDir(activePackPath, candidate.type);
+	const fileSlug = slugify(candidate.title);
+	const fileName = candidate.type === "action" ? `${todayStr()}-${fileSlug}.md` : `${fileSlug}.md`;
+	const filePath = path.join(noteDir, fileName);
+	const body = `${candidate.content}\n\n## Evidence\n\n- Confidence: ${Math.round(candidate.confidence * 100)}%\n- Reason: ${candidate.reason}`;
+	if (fs.existsSync(filePath)) {
+		const existing = readFileSafe(filePath) ?? "";
+		fs.writeFileSync(filePath, `${existing}\n\n---\n\n## Update (${nowTimestamp()})\n\n${body}\n`, "utf-8");
+		return { rel: path.relative(activePackPath, filePath), action: "updated" };
+	}
+	fs.writeFileSync(filePath, buildNote(activePack, candidate.type, candidate.title, body, candidate.tags), "utf-8");
+	return { rel: path.relative(activePackPath, filePath), action: "created" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1930,6 +2079,8 @@ export function _resetState() {
 	strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
 	autoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
 	llmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
+	retrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
+	autosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
 	lastRetrieval = null;
 	lastPackSelection = null;
 	lastPackSwitch = null;
@@ -2001,20 +2152,28 @@ export default function (pi: ExtensionAPI) {
 		let searchResults = "";
 		let retrievalMode: RetrievalStatus["mode"] = "none";
 		let resultCount = 0;
-		const sanitized = (event.prompt ?? "").replace(/[^\w\s.,?!-]/g, "").slice(0, 240).trim();
+		let retrievalQuery = "";
+		let retrievalQueries: string[] = [];
+		let crossPackHits: string[] = [];
 
-		if (sanitized) {
-			const retrieval = await searchPackMemory(activePackPath, sanitized, 3, "keyword");
+		if (event.prompt?.trim()) {
+			const retrieval = await retrieveForPrompt(event.prompt, ctx);
 			searchResults = retrieval.text;
 			retrievalMode = retrieval.mode;
-			resultCount = retrieval.matchCount;
+			resultCount = retrieval.count;
+			retrievalQuery = retrieval.query;
+			retrievalQueries = retrieval.queries;
+			crossPackHits = retrieval.crossPackHits;
 		}
 
 		lastRetrieval = {
 			prompt: truncate(event.prompt ?? "", 200),
 			mode: retrievalMode,
-			query: sanitized,
+			query: retrievalQuery,
+			queries: retrievalQueries,
+			policy: retrievalPolicy,
 			resultCount,
+			crossPackHits,
 			timestamp: nowTimestamp(),
 		};
 
@@ -2037,7 +2196,9 @@ export default function (pi: ExtensionAPI) {
 		const injection = [
 			"\n\n## Memory Context",
 			`Active pack: \`${activePack}\``,
-			`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"})`,
+			`Retrieval: ${retrievalMode} (${resultCount} result${resultCount === 1 ? "" : "s"}; policy: ${retrievalPolicy})`,
+			retrievalQueries.length ? `Queries attempted: ${retrievalQueries.map((q) => `\`${q}\``).join(", ")}` : "Queries attempted: none",
+			crossPackHits.length ? `Cross-pack hints: ${crossPackHits.join(", ")}` : "",
 			"The following memory context has been loaded from the pack.",
 			"Use the memctx_search tool to find additional context across pack files.",
 			"",
@@ -2086,7 +2247,22 @@ export default function (pi: ExtensionAPI) {
 
 		if (recentMessages.length === 0) return;
 
-		const summary = recentMessages.join("\n");
+		let summary = recentMessages.join("\n");
+		if (llmMode !== "off" && ctx.model) {
+			const digest = await completeJsonWithLlm<{ summary?: string; completedActions?: string[]; decisions?: string[]; openQuestions?: string[]; memoryCandidates?: string[] }>(ctx, "session-handoff-digest", [
+				"Create a compact structured session handoff from recent conversation messages.",
+				"Return ONLY JSON with summary, completedActions[], decisions[], openQuestions[], memoryCandidates[]. Do not include secrets.",
+			].join("\n"), { messages: recentMessages });
+			if (digest?.summary) {
+				summary = [
+					`## Summary\n\n${digest.summary}`,
+					digest.completedActions?.length ? `## Completed actions\n\n${digest.completedActions.map((x) => `- ${x}`).join("\n")}` : "",
+					digest.decisions?.length ? `## Decisions\n\n${digest.decisions.map((x) => `- ${x}`).join("\n")}` : "",
+					digest.openQuestions?.length ? `## Open questions\n\n${digest.openQuestions.map((x) => `- ${x}`).join("\n")}` : "",
+					digest.memoryCandidates?.length ? `## Memory candidates\n\n${digest.memoryCandidates.map((x) => `- ${x}`).join("\n")}` : "",
+				].filter(Boolean).join("\n\n");
+			}
+		}
 		const handoff = buildSessionHandoff(sessionId, activePack, summary);
 
 		const today = todayStr();
@@ -2116,8 +2292,11 @@ export default function (pi: ExtensionAPI) {
 			const retrieval = lastRetrieval
 				? [
 					`Last retrieval: ${lastRetrieval.mode}`,
+					`  policy: ${lastRetrieval.policy}`,
 					`  query: ${lastRetrieval.query || "<none>"}`,
+					`  queries: ${lastRetrieval.queries.join(" | ") || "<none>"}`,
 					`  results: ${lastRetrieval.resultCount}`,
+					`  cross-pack hits: ${lastRetrieval.crossPackHits.join(", ") || "<none>"}`,
 					`  at: ${lastRetrieval.timestamp}`,
 				]
 				: ["Last retrieval: none"];
@@ -2136,6 +2315,9 @@ export default function (pi: ExtensionAPI) {
 				`Packs dir: ${packsDir || "<none>"}`,
 				`Pack files: ${packFileCount} markdown files`,
 				`Auto-switch: ${autoSwitchMode}`,
+				`Retrieval policy: ${retrievalPolicy}`,
+				`Autosave: ${autosaveMode}`,
+				`Save queue: ${readSaveQueue().length} pending`,
 				...selection,
 				...switchLines,
 				`qmd: ${qmdStatus.available ? "available" : "unavailable"}`,
@@ -2209,6 +2391,139 @@ export default function (pi: ExtensionAPI) {
 			}
 			ctx.ui.notify(`memctx: LLM mode ${llmMode}. Calls this session: ${llmStats.callsThisSession}. Last: ${llmStats.lastUseCase ?? "none"}.`, "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
+		},
+	});
+
+	// --- /memctx-retrieval command: configure automatic retrieval depth ---
+	pi.registerCommand("memctx-retrieval", {
+		description: "Configure automatic memory retrieval. Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["auto", "fast", "balanced", "deep", "strict"].includes(target)) {
+				retrievalPolicy = target as RetrievalPolicy;
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx: Retrieval policy ${retrievalPolicy}.`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
+		},
+	});
+
+	// --- /memctx-autosave command: configure memory capture behavior ---
+	pi.registerCommand("memctx-autosave", {
+		description: "Configure memory save suggestions. Usage: /memctx-autosave [off|suggest|confirm|auto|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["off", "suggest", "confirm", "auto"].includes(target)) {
+				autosaveMode = target as AutosaveMode;
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-autosave [off|suggest|confirm|auto|status]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx: Autosave ${autosaveMode}. Save queue: ${readSaveQueue().length} pending.`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
+		},
+	});
+
+	// --- /memctx-save-queue command: review pending memory candidates ---
+	pi.registerCommand("memctx-save-queue", {
+		description: "Review memory save candidates. Usage: /memctx-save-queue [list|approve <id>|reject <id>|clear]",
+		handler: async (args, ctx) => {
+			const [action = "list", id = ""] = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			let queue = readSaveQueue();
+			if (action === "clear") {
+				writeSaveQueue([]);
+				ctx.ui.notify("memctx: Save queue cleared.", "info");
+				return;
+			}
+			if (action === "reject") {
+				queue = queue.filter((item) => item.id !== id);
+				writeSaveQueue(queue);
+				ctx.ui.notify(`memctx: Rejected candidate ${id || "<none>"}.`, "info");
+				return;
+			}
+			if (action === "approve") {
+				const candidate = queue.find((item) => item.id === id);
+				if (!candidate) {
+					ctx.ui.notify(`memctx: Candidate not found: ${id}`, "error");
+					return;
+				}
+				try {
+					const saved = saveMemoryCandidate(candidate);
+					writeSaveQueue(queue.filter((item) => item.id !== id));
+					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+					ctx.ui.notify(`memctx: Saved candidate to ${saved.rel}`, "info");
+				} catch (err) {
+					ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
+				}
+				return;
+			}
+			if (queue.length === 0) {
+				ctx.ui.notify("memctx: Save queue is empty.", "info");
+				return;
+			}
+			ctx.ui.notify(queue.map((item) => `${item.id}: ${item.type} · ${item.title} · ${Math.round(item.confidence * 100)}%`).join("\n"), "info");
+		},
+	});
+
+	// --- /memctx-doctor command: diagnose runtime and pack health ---
+	pi.registerCommand("memctx-doctor", {
+		description: "Diagnose active memory pack health and runtime configuration. Usage: /memctx-doctor",
+		handler: async (_args, ctx) => {
+			const files = activePackPath ? scanPackFiles(activePackPath) : [];
+			const placeholders = files.filter((file) => readFileSafe(file)?.includes("<Add wikilink>")).length;
+			const possibleSecrets = files.filter((file) => sensitivePatternHit(path.basename(file), readFileSafe(file) ?? "")).length;
+			const duplicateSlugs = new Set<string>();
+			const seen = new Set<string>();
+			for (const file of files) {
+				const slug = path.basename(file).replace(/^\d{4}-\d{2}-\d{2}-/, "");
+				if (seen.has(slug)) duplicateSlugs.add(slug);
+				seen.add(slug);
+			}
+			const lines = [
+				`Pack: ${activePack || "<none>"}`,
+				`Path: ${activePackPath || "<none>"}`,
+				`Files: ${files.length} markdown`,
+				`qmd: ${qmdStatus.available ? "available" : "unavailable"} (${qmdStatus.source})`,
+				`qmd collection: ${qmdCollection || "<none>"}`,
+				`Retrieval: ${retrievalPolicy}`,
+				`Autosave: ${autosaveMode}`,
+				`LLM: ${llmMode}`,
+				`Strict: ${strictMode ? "on" : "off"}`,
+				`Save queue: ${readSaveQueue().length} pending`,
+				`Template placeholders: ${placeholders}`,
+				`Possible duplicate slugs: ${duplicateSlugs.size}`,
+				`Secret scan warnings: ${possibleSecrets}`,
+			];
+			ctx.ui.notify(lines.join("\n"), possibleSecrets ? "warning" : "info");
+		},
+	});
+
+	// --- /memctx-pack-enrich command: enrich existing pack with LLM notes ---
+	pi.registerCommand("memctx-pack-enrich", {
+		description: "Run LLM-assisted enrichment for the active pack. Usage: /memctx-pack-enrich [source-dir]",
+		handler: async (args, ctx) => {
+			if (!activePackPath || !activePack) {
+				ctx.ui.notify("memctx: No active pack to enrich.", "error");
+				return;
+			}
+			if (llmMode === "off" || !ctx.model) {
+				ctx.ui.notify("memctx: Enable /memctx-llm assist|first and select a model before enriching.", "error");
+				return;
+			}
+			let scanDir = (args ?? "").trim();
+			if (!scanDir) {
+				const resource = readFileSafe(path.join(activePackPath, "00-system", "pi-agent", "resource-map.md")) ?? "";
+				scanDir = resource.match(/## Source directory\s*\n\s*`([^`]+)`/m)?.[1] ?? "";
+			}
+			if (!scanDir || !fs.existsSync(scanDir)) {
+				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir]", "error");
+				return;
+			}
+			const files = await enrichGeneratedPackWithLlm(scanDir, activePack, activePackPath, ctx);
+			if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+			ctx.ui.notify(`memctx: Enriched pack ${activePack} with ${files.length} generated/updated files.`, "info");
 		},
 	});
 
@@ -2581,39 +2896,116 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// --- agent_end: propose learnings ---
-	pi.on("agent_end", async (event, ctx) => {
-		if (!activePackPath || !activePack) return;
+	// --- tool_result: retrieve related memory after failures ---
+	pi.on("tool_result", async (event, ctx) => {
+		if (!activePackPath || !activePack || !(event as any).isError) return;
+		const text = JSON.stringify((event as any).content ?? "").slice(0, 500);
+		if (!text.trim()) return;
+		const result = await searchPackMemory(activePackPath, text, 2, "keyword");
+		if (result.matchCount > 0 && ctx.hasUI) {
+			ctx.ui.setWidget("memctx-tool-failure", [
+				"\x1b[33m💡 memctx: Found memory that may help with the failed tool call.\x1b[0m",
+				truncate(result.text.replace(/\n+/g, " "), 300),
+			]);
+			setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-tool-failure", []), 20000);
+		}
+	});
 
-		// Check if the agent used tool calls that discovered something
+	// --- agent_end: propose or save learnings ---
+	pi.on("agent_end", async (event, ctx) => {
+		if (!activePackPath || !activePack || autosaveMode === "off") return;
+
 		const messages = (event as any).messages ?? [];
 		let hasToolCalls = false;
 		let hasWrites = false;
+		const snippets: string[] = [];
 
 		for (const msg of messages) {
-			if (msg.type !== "message") continue;
-			const m = msg.message;
-			if (!m || m.role !== "assistant" || !Array.isArray(m.content)) continue;
-			for (const block of m.content) {
-				if (block.type === "toolCall") {
-					hasToolCalls = true;
-					if (["write", "edit", "bash"].includes(block.name)) {
-						hasWrites = true;
+			const m = msg.type === "message" ? msg.message : msg;
+			if (!m) continue;
+			if (m.role === "user" && typeof m.content === "string") snippets.push(`User: ${truncate(m.content, 300)}`);
+			if (m.role === "assistant" && Array.isArray(m.content)) {
+				for (const block of m.content) {
+					if (block.type === "text" && block.text) snippets.push(`Assistant: ${truncate(block.text, 300)}`);
+					if (block.type === "toolCall") {
+						hasToolCalls = true;
+						if (["write", "edit", "bash"].includes(block.name)) hasWrites = true;
+						snippets.push(`Tool: ${block.name}`);
 					}
 				}
 			}
 		}
 
-		// Only nudge after substantial work (tool calls + writes)
-		if (hasToolCalls && hasWrites && ctx.hasUI) {
+		if (!hasToolCalls && !hasWrites) return;
+		let candidate: MemoryCandidate | null = null;
+		if (llmMode !== "off" && ctx.model) {
+			const generated = await completeJsonWithLlm<Partial<MemoryCandidate> & { shouldSave?: boolean }>(ctx, "autosave-memory-candidate", [
+				"Decide whether this coding-agent turn contains durable memory worth saving.",
+				"Return ONLY JSON with shouldSave, type, title, content, tags[], confidence 0..1, reason.",
+				"Save only durable project knowledge: decisions, completed actions, conventions, runbooks, architecture/context. Do not save secrets or transient chatter.",
+			].join("\n"), { activePack, autosaveMode, snippets: snippets.slice(-20) });
+			if (generated?.shouldSave && generated.title && generated.content && NOTE_TYPES.includes(generated.type as NoteType)) {
+				candidate = {
+					id: `mem-${Date.now().toString(36)}`,
+					type: generated.type as NoteType,
+					title: generated.title,
+					content: generated.content,
+					tags: Array.isArray(generated.tags) ? generated.tags : ["autosave"],
+					confidence: typeof generated.confidence === "number" ? generated.confidence : 0.7,
+					reason: generated.reason ?? "LLM autosave candidate",
+					createdAt: nowTimestamp(),
+					pack: activePack,
+				};
+			}
+		}
+		if (!candidate && hasWrites) {
+			candidate = {
+				id: `mem-${Date.now().toString(36)}`,
+				type: "action",
+				title: `Session changes ${todayStr()}`,
+				content: `A Pi session made code or command changes. Review the session before relying on this note.\n\n${snippets.slice(-8).join("\n")}`,
+				tags: ["autosave", "session"],
+				confidence: 0.55,
+				reason: "Detected write/edit/bash activity",
+				createdAt: nowTimestamp(),
+				pack: activePack,
+			};
+		}
+		if (!candidate || sensitivePatternHit(candidate.title, candidate.content)) return;
+
+		if (autosaveMode === "auto" && candidate.confidence >= 0.85) {
+			try {
+				const saved = saveMemoryCandidate(candidate);
+				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+				if (ctx.hasUI) ctx.ui.notify(`memctx: Autosaved ${candidate.type}: ${saved.rel}`, "info");
+			} catch {
+				enqueueMemoryCandidate(candidate);
+			}
+			return;
+		}
+
+		if (autosaveMode === "confirm" && ctx.hasUI) {
+			const approved = await ctx.ui.confirm("Save memory candidate?", `${candidate.type}: ${candidate.title}\n\n${truncate(candidate.content, 500)}`);
+			if (approved) {
+				try {
+					const saved = saveMemoryCandidate(candidate);
+					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+					ctx.ui.notify(`memctx: Saved ${candidate.type}: ${saved.rel}`, "info");
+					return;
+				} catch (err) {
+					ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
+				}
+			}
+		}
+
+		enqueueMemoryCandidate(candidate);
+		if (ctx.hasUI) {
 			ctx.ui.setWidget("memctx-learn", [
-				"\x1b[33m💡 memctx: This session made changes. Save learnings with memctx_save?\x1b[0m",
-				"   Ask: \"save what we learned to memory\" or use memctx_save directly.",
+				`\x1b[33m💡 memctx: Memory candidate queued (${candidate.type}, ${Math.round(candidate.confidence * 100)}%).\x1b[0m`,
+				`   ${candidate.title}`,
+				`   Review: /memctx-save-queue approve ${candidate.id}`,
 			]);
-			// Clear the widget after 30 seconds
-			setTimeout(() => {
-				if (ctx.hasUI) ctx.ui.setWidget("memctx-learn", []);
-			}, 30000);
+			setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-learn", []), 30000);
 		}
 	});
 }
