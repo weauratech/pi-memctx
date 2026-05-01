@@ -112,6 +112,29 @@ JSON
 }
 JSON
       ;;
+    qmd-economy)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "qmd-economy",
+  "baseProfile": "qmd-economy",
+  "strict": false,
+  "retrieval": "fast",
+  "retrievalLatencyBudgetMs": 250,
+  "autosave": "off",
+  "autosaveQueueLowConfidence": false,
+  "llm": "off",
+  "autoSwitch": "cwd",
+  "autoBootstrap": "ask",
+  "startupDoctor": "off",
+  "toolFailureHints": false,
+  "contextMode": "compact",
+  "contextPipeline": "qmd-economy",
+  "contextTokenBudget": 650,
+  "contextMaxItems": 8,
+  "contextStripMetadata": true
+}
+JSON
+      ;;
     balanced)
       cat > "$config_path" <<'JSON'
 {
