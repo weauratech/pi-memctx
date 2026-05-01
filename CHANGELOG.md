@@ -6,10 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+
+## [0.5.1] - 2026-05-01
+
 ### Fixed
 
 - Use a release dependency install that can refresh peer metadata from the lockfile before publishing.
 - Use deterministic release dependency installation from the lockfile.
+<!-- Automatically released from fix/release-install-lock-update as a patch bump via #24. -->
 
 ## [0.5.0] - 2026-05-01
 
