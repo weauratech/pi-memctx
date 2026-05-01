@@ -195,9 +195,21 @@ jobs:
           const note = `<!-- Automatically released from ${branch} as a ${bump} bump${prRef ? ` via ${prRef}` : ""}. -->`;
 
           fs.writeFileSync(path, `${before}\n${section}${note}\n${after.replace(/^\n+/, "\n")}`);
+
+          const readmePath = "README.md";
+          const readme = fs.readFileSync(readmePath, "utf8");
+          const badgeUrl = `https://img.shields.io/badge/release-v${version}-blue?style=flat`;
+          const updatedReadme = readme.replace(
+            /<a href="https:\/\/github\.com\/weauratech\/pi-memctx\/releases\/latest"><img src="[^"]+" alt="Latest Release"><\/a>/,
+            `<a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="${badgeUrl}" alt="Latest Release"></a>`,
+          );
+          if (updatedReadme === readme) {
+            throw new Error("README.md latest release badge was not found");
+          }
+          fs.writeFileSync(readmePath, updatedReadme);
           NODE
 
-          git add package.json package-lock.json CHANGELOG.md
+          git add package.json package-lock.json CHANGELOG.md README.md
           git commit -m "chore(release): $TAG [skip ci]"
           git push origin HEAD:main
           git tag "$TAG"
