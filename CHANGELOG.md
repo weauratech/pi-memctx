@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+
+## [0.5.6] - 2026-05-01
+
 ### Fixed
 
 - Keep the README release badge in sync during automatic release bumps.
+<!-- Automatically released from fix/sync-readme-release-badge as a patch bump via #30. -->
 
 ## [0.5.5] - 2026-05-01
 
