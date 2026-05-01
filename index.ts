@@ -21,6 +21,7 @@
 import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 
@@ -75,6 +76,35 @@ let strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
 
 type SearchMode = "keyword" | "semantic" | "deep";
 type QmdSource = "env" | "path" | "local-dependency" | "missing";
+type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
+type LlmMode = "off" | "assist" | "first";
+type Confidence = "none" | "low" | "medium" | "high";
+
+type PackMatch = {
+	pack: string;
+	packPath: string;
+	score: number;
+	confidence: Confidence;
+	reasons: string[];
+};
+
+type PackSwitch = {
+	from: string;
+	to: string;
+	reason: string;
+	confidence: Confidence;
+	timestamp: string;
+};
+
+type LlmStats = {
+	mode: LlmMode;
+	callsThisSession: number;
+	lastUseCase?: string;
+	lastDecision?: string;
+	estimatedInputChars: number;
+	estimatedOutputChars: number;
+	lastError?: string;
+};
 
 export type QmdStatus = {
 	available: boolean;
@@ -94,9 +124,51 @@ type RetrievalStatus = {
 
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
+let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
+let llmMode: LlmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
+let lastPackSelection: PackMatch | null = null;
+let lastPackSwitch: PackSwitch | null = null;
+let llmStats: LlmStats = {
+	mode: llmMode,
+	callsThisSession: 0,
+	estimatedInputChars: 0,
+	estimatedOutputChars: 0,
+};
 
 function parseBooleanEnv(value: string | undefined): boolean {
 	return ["1", "true", "yes", "on"].includes((value ?? "").toLowerCase());
+}
+
+function parseAutoSwitchMode(value: string | undefined): AutoSwitchMode {
+	const normalized = (value ?? "cwd").toLowerCase();
+	return ["off", "cwd", "prompt", "all"].includes(normalized) ? normalized as AutoSwitchMode : "cwd";
+}
+
+function parseLlmMode(value: string | undefined): LlmMode {
+	const normalized = (value ?? "assist").toLowerCase();
+	return ["off", "assist", "first"].includes(normalized) ? normalized as LlmMode : "assist";
+}
+
+function confidenceForScore(score: number): Confidence {
+	if (score >= 90) return "high";
+	if (score >= 45) return "medium";
+	if (score > 0) return "low";
+	return "none";
+}
+
+function safeJsonParse<T>(text: string): T | null {
+	const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+	try {
+		return JSON.parse(trimmed) as T;
+	} catch {
+		const match = trimmed.match(/\{[\s\S]*\}/);
+		if (!match) return null;
+		try {
+			return JSON.parse(match[0]) as T;
+		} catch {
+			return null;
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -143,31 +215,83 @@ export function listPacks(packsDir: string): string[] {
 
 /**
  * Score how well a pack matches the current working directory.
- * Reads the pack's resource-map and context files looking for repo names
- * that match the cwd basename or parent directories.
+ * Uses exact local path and repository metadata matches before falling back
+ * to lightweight term matches across pack Markdown files.
  */
 export function scorePackForCwd(packPath: string, cwd: string): number {
-	const cwdParts = cwd.split(path.sep).filter(Boolean);
-	// Collect the last 3 path segments as candidates (e.g. "project-a", "service-api", "module")
-	const candidates = cwdParts.slice(-3).map((p) => p.toLowerCase());
-	if (candidates.length === 0) return 0;
+	return detectPackMatchForCwd(packPath, path.basename(packPath), cwd).score;
+}
 
-	// Scan all markdown files in the pack for mentions of cwd segments
+function normalizePathForMatch(value: string): string {
+	return path.resolve(value.replace(/^`|`$/g, "")).toLowerCase();
+}
+
+function extractPackAliases(pack: string, packPath: string): { aliases: string[]; evidence: string[] } {
+	const aliases = new Set<string>([pack]);
+	const evidence: string[] = [];
+	for (const file of scanPackFiles(packPath).slice(0, 80)) {
+		const content = readFileSafe(file);
+		if (!content) continue;
+		const rel = path.relative(packPath, file);
+		const title = content.match(/^title:\s*(.+)$/m)?.[1]?.trim();
+		if (title && title.length < 100) aliases.add(title);
+		for (const tag of content.matchAll(/repo\/([a-zA-Z0-9_.-]+)/g)) aliases.add(tag[1]);
+		for (const localPath of content.matchAll(/(?:Local path|\*\*Local path:\*\*)\s*\|?\s*`([^`]+)`/gi)) {
+			evidence.push(`local path ${localPath[1]}`);
+			aliases.add(path.basename(localPath[1]));
+		}
+		for (const remote of content.matchAll(/(?:Remote|\*\*Remote:\*\*)\s*\|?\s*`([^`]+)`/gi)) {
+			evidence.push(`remote ${remote[1]}`);
+			const name = remote[1].split(/[/:]/).pop()?.replace(/\.git$/, "");
+			if (name) aliases.add(name);
+		}
+		if (["00-system/pi-agent/resource-map.md", "20-context/overview.md"].includes(rel)) {
+			evidence.push(truncate(content.replace(/\s+/g, " "), 900));
+		}
+	}
+	return { aliases: [...aliases].filter((a) => a.length >= 2).slice(0, 80), evidence: evidence.slice(0, 20) };
+}
+
+export function detectPackMatchForCwd(packPath: string, pack: string, cwd: string): PackMatch {
+	const cwdResolved = normalizePathForMatch(cwd);
+	const cwdParts = cwdResolved.split(path.sep).filter(Boolean);
+	const candidates = cwdParts.slice(-4).map((p) => p.toLowerCase()).filter((p) => p.length >= 3);
 	const files = scanPackFiles(packPath);
 	let score = 0;
+	const reasons: string[] = [];
 
-	for (const f of files) {
-		const content = readFileSafe(f);
+	for (const file of files) {
+		const content = readFileSafe(file);
 		if (!content) continue;
 		const contentLower = content.toLowerCase();
+		for (const localPath of content.matchAll(/`([^`]*\/[^`]+)`/g)) {
+			const normalized = normalizePathForMatch(localPath[1]);
+			if (cwdResolved === normalized || cwdResolved.startsWith(`${normalized}${path.sep}`)) {
+				score += 100;
+				reasons.push(`cwd is inside documented path ${localPath[1]}`);
+			}
+		}
 		for (const candidate of candidates) {
-			if (candidate.length >= 3 && contentLower.includes(candidate)) {
-				score++;
+			if (contentLower.includes(candidate)) {
+				score += candidate === path.basename(cwdResolved) ? 12 : 4;
+				if (reasons.length < 8) reasons.push(`matched cwd segment "${candidate}" in ${path.relative(packPath, file)}`);
 			}
 		}
 	}
 
-	return score;
+	if (pack.toLowerCase() && cwdResolved.includes(pack.toLowerCase())) {
+		score += 30;
+		reasons.push(`cwd contains pack name "${pack}"`);
+	}
+
+	return { pack, packPath, score, confidence: confidenceForScore(score), reasons: [...new Set(reasons)].slice(0, 8) };
+}
+
+export function detectBestPackForCwd(packsDir: string, cwd: string): PackMatch | null {
+	const matches = listPacks(packsDir)
+		.map((pack) => detectPackMatchForCwd(path.join(packsDir, pack), pack, cwd))
+		.sort((a, b) => b.score - a.score);
+	return matches[0]?.score ? matches[0] : null;
 }
 
 export function detectActivePack(packsDir: string, cwd?: string): string | null {
@@ -175,16 +299,14 @@ export function detectActivePack(packsDir: string, cwd?: string): string | null 
 	if (packs.length === 0) return null;
 	if (packs.length === 1) return packs[0];
 
-	// Auto-detect by cwd: score each pack and pick the best match
 	if (cwd) {
-		const scored = packs
-			.map((pack) => ({ pack, score: scorePackForCwd(path.join(packsDir, pack), cwd) }))
-			.filter((s) => s.score > 0)
-			.sort((a, b) => b.score - a.score);
-		if (scored.length > 0) return scored[0].pack;
+		const match = detectBestPackForCwd(packsDir, cwd);
+		if (match) {
+			lastPackSelection = match;
+			return match.pack;
+		}
 	}
 
-	// Fallback: prefer one with a manifest
 	for (const pack of packs) {
 		const manifestDir = path.join(packsDir, pack, "00-system");
 		if (fs.existsSync(manifestDir)) return pack;
@@ -351,6 +473,125 @@ export function grepSearchPack(packPath: string, query: string, limit = 5): { te
 	}
 
 	return { text: matches.join("\n\n"), matchCount: matches.length };
+}
+
+async function completeJsonWithLlm<T>(
+	ctx: ExtensionContext,
+	useCase: string,
+	systemPrompt: string,
+	payload: unknown,
+): Promise<T | null> {
+	if (llmMode === "off" || !ctx.model) return null;
+	try {
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
+		if (!auth.ok || !auth.apiKey) {
+			llmStats.lastError = auth.ok ? `No API key for ${ctx.model.provider}` : auth.error;
+			return null;
+		}
+		const text = JSON.stringify(payload);
+		llmStats.callsThisSession++;
+		llmStats.lastUseCase = useCase;
+		llmStats.estimatedInputChars += systemPrompt.length + text.length;
+		const userMessage: UserMessage = {
+			role: "user",
+			content: [{ type: "text", text }],
+			timestamp: Date.now(),
+		};
+		const response = await complete(
+			ctx.model,
+			{ systemPrompt, messages: [userMessage] },
+			{ apiKey: auth.apiKey, headers: auth.headers, signal: ctx.signal },
+		);
+		const out = response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n");
+		llmStats.estimatedOutputChars += out.length;
+		return safeJsonParse<T>(out);
+	} catch (err) {
+		llmStats.lastError = err instanceof Error ? err.message : String(err);
+		return null;
+	}
+}
+
+type PromptPackIntent = {
+	targetPack?: string;
+	shouldSwitch?: boolean;
+	confidence?: number;
+	reason?: string;
+};
+
+function detectPromptPackIntentDeterministic(prompt: string, packsDir: string): PackMatch | null {
+	const promptLower = prompt.toLowerCase();
+	const matches = listPacks(packsDir).map((pack) => {
+		const packPath = path.join(packsDir, pack);
+		const { aliases } = extractPackAliases(pack, packPath);
+		let score = 0;
+		const reasons: string[] = [];
+		for (const alias of aliases) {
+			const normalized = alias.toLowerCase();
+			if (normalized.length < 3) continue;
+			if (promptLower.includes(normalized)) {
+				score += normalized === pack.toLowerCase() ? 100 : 55;
+				if (reasons.length < 5) reasons.push(`prompt matched alias "${alias}"`);
+			}
+		}
+		return { pack, packPath, score, confidence: confidenceForScore(score), reasons };
+	}).sort((a, b) => b.score - a.score);
+	return matches[0]?.score ? matches[0] : null;
+}
+
+async function detectPromptPackIntentWithLlm(prompt: string, packsDir: string, ctx: ExtensionContext): Promise<PackMatch | null> {
+	const packs = listPacks(packsDir).map((pack) => {
+		const packPath = path.join(packsDir, pack);
+		const { aliases, evidence } = extractPackAliases(pack, packPath);
+		return { name: pack, aliases: aliases.slice(0, 30), evidence: evidence.slice(0, 6) };
+	});
+	const decision = await completeJsonWithLlm<PromptPackIntent>(ctx, "prompt-pack-switch", [
+		"You classify which memory pack best matches the user's prompt.",
+		"Return ONLY JSON with: targetPack string|null, shouldSwitch boolean, confidence number 0..1, reason string.",
+		"Only choose a pack when the prompt clearly names or strongly implies it. Prefer no switch for ambiguity.",
+	].join("\n"), { currentPack: activePack, prompt: truncate(prompt, 600), packs });
+	if (!decision?.shouldSwitch || !decision.targetPack) return null;
+	if (!listPacks(packsDir).includes(decision.targetPack)) return null;
+	const score = Math.round((decision.confidence ?? 0) * 100);
+	llmStats.lastDecision = `${activePack || "<none>"} → ${decision.targetPack}: ${decision.reason ?? "LLM decision"}`;
+	return {
+		pack: decision.targetPack,
+		packPath: path.join(packsDir, decision.targetPack),
+		score,
+		confidence: confidenceForScore(score),
+		reasons: [`LLM: ${decision.reason ?? "prompt matched pack"}`],
+	};
+}
+
+async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: ExtensionContext): Promise<PackMatch | null> {
+	if (!["prompt", "all"].includes(autoSwitchMode)) return null;
+	const deterministic = detectPromptPackIntentDeterministic(prompt, packsDir);
+	let match = deterministic;
+	if (llmMode === "first" || (llmMode === "assist" && (!deterministic || deterministic.confidence !== "high"))) {
+		match = await detectPromptPackIntentWithLlm(prompt, packsDir, ctx) ?? deterministic;
+	}
+	if (!match || match.pack === activePack || match.score < 75) return match;
+	const from = activePack;
+	activePack = match.pack;
+	activePackPath = match.packPath;
+	qmdCollection = `memctx-${match.pack}`;
+	lastPackSelection = match;
+	lastPackSwitch = { from, to: match.pack, reason: match.reasons.join("; "), confidence: match.confidence, timestamp: nowTimestamp() };
+	if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+	if (ctx.hasUI) {
+		ctx.ui.notify(`memctx: Switched pack ${from || "<none>"} → ${match.pack} (${match.confidence}: ${match.reasons[0] ?? "prompt match"})`, "info");
+		ctx.ui.setStatus("memctx", buildStatusText());
+	}
+	return match;
+}
+
+function buildStatusText(): string {
+	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}` : "idle";
+	const strict = strictMode ? " strict" : "";
+	const llm = llmMode !== "off" ? ` llm:${llmStats.callsThisSession}` : "";
+	return `📦 ${activePack || "none"} · ${retrieval}${strict}${llm}`;
 }
 
 export async function searchPackMemory(
@@ -1494,7 +1735,12 @@ export function _resetState() {
 	qmdStatus = { available: false, source: "missing" };
 	qmdCollection = "";
 	strictMode = parseBooleanEnv(process.env.MEMCTX_STRICT);
+	autoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
+	llmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 	lastRetrieval = null;
+	lastPackSelection = null;
+	lastPackSwitch = null;
+	llmStats = { mode: llmMode, callsThisSession: 0, estimatedInputChars: 0, estimatedOutputChars: 0 };
 	_packsDir = "";
 }
 
@@ -1520,7 +1766,7 @@ export default function (pi: ExtensionAPI) {
 
 		vaultRoot = path.dirname(packsDir);
 		_packsDir = packsDir;
-		const detected = detectActivePack(packsDir, ctx.cwd);
+		const detected = detectActivePack(packsDir, ["cwd", "all"].includes(autoSwitchMode) ? ctx.cwd : undefined);
 
 		if (!detected) {
 			if (ctx.hasUI) {
@@ -1545,14 +1791,19 @@ export default function (pi: ExtensionAPI) {
 			const qmdLabel = qmdAvailable
 				? `qmd ✓ (${qmdStatus.source})`
 				: "qmd ✗ (grep fallback)";
-			ctx.ui.notify(`memctx: Pack "${activePack}" loaded. ${qmdLabel}`, "info");
-			ctx.ui.setStatus("memctx", `📦 ${activePack}`);
+			const selection = lastPackSelection?.pack === activePack ? ` ${lastPackSelection.confidence} cwd match` : "";
+			ctx.ui.notify(`memctx: Pack "${activePack}" loaded.${selection} ${qmdLabel}`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
 		}
 	});
 
 	// --- before_agent_start: inject pack context ---
-	pi.on("before_agent_start", async (event, _ctx) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		if (!activePackPath) return;
+		const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
+		if (packsDir && event.prompt) {
+			await maybeSwitchPackByPrompt(event.prompt, packsDir, ctx);
+		}
 
 		let searchResults = "";
 		let retrievalMode: RetrievalStatus["mode"] = "none";
@@ -1601,6 +1852,8 @@ export default function (pi: ExtensionAPI) {
 			"",
 			packContext,
 		].join("\n");
+
+		if (ctx.hasUI) ctx.ui.setStatus("memctx", buildStatusText());
 
 		return {
 			systemPrompt: event.systemPrompt + injection,
@@ -1675,11 +1928,23 @@ export default function (pi: ExtensionAPI) {
 					`  at: ${lastRetrieval.timestamp}`,
 				]
 				: ["Last retrieval: none"];
+			const selection = lastPackSelection
+				? [
+					`Selection: ${lastPackSelection.confidence} (${lastPackSelection.score})`,
+					`  reasons: ${lastPackSelection.reasons.join("; ") || "<none>"}`,
+				]
+				: ["Selection: <none>"];
+			const switchLines = lastPackSwitch
+				? [`Last switch: ${lastPackSwitch.from || "<none>"} → ${lastPackSwitch.to}`, `  reason: ${lastPackSwitch.reason}`, `  at: ${lastPackSwitch.timestamp}`]
+				: ["Last switch: none"];
 			const lines = [
 				`Active pack: ${activePack || "<none>"}`,
 				`Pack path: ${activePackPath || "<none>"}`,
 				`Packs dir: ${packsDir || "<none>"}`,
 				`Pack files: ${packFileCount} markdown files`,
+				`Auto-switch: ${autoSwitchMode}`,
+				...selection,
+				...switchLines,
 				`qmd: ${qmdStatus.available ? "available" : "unavailable"}`,
 				`qmd source: ${qmdStatus.source}`,
 				`qmd bin: ${qmdStatus.bin ?? "<none>"}`,
@@ -1687,6 +1952,12 @@ export default function (pi: ExtensionAPI) {
 				`qmd error: ${qmdStatus.error ?? "<none>"}`,
 				`qmd collection: ${qmdCollection || "<none>"}`,
 				`Strict mode: ${strictMode ? "on" : "off"}`,
+				`LLM mode: ${llmMode}`,
+				`LLM calls: ${llmStats.callsThisSession}`,
+				`LLM last use: ${llmStats.lastUseCase ?? "<none>"}`,
+				`LLM last decision: ${llmStats.lastDecision ?? "<none>"}`,
+				`LLM chars: in ${llmStats.estimatedInputChars}, out ${llmStats.estimatedOutputChars}`,
+				`LLM error: ${llmStats.lastError ?? "<none>"}`,
 				...retrieval,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
@@ -1707,6 +1978,39 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			ctx.ui.notify(`memctx: Strict mode ${strictMode ? "on" : "off"}.`, "info");
+		},
+	});
+
+	// --- /memctx-auto-switch command: toggle cwd/prompt pack switching ---
+	pi.registerCommand("memctx-auto-switch", {
+		description: "Configure automatic pack switching. Usage: /memctx-auto-switch [off|cwd|prompt|all|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["off", "cwd", "prompt", "all"].includes(target)) {
+				autoSwitchMode = target as AutoSwitchMode;
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-auto-switch [off|cwd|prompt|all|status]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx: Auto-switch ${autoSwitchMode}.`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
+		},
+	});
+
+	// --- /memctx-llm command: configure LLM assistance ---
+	pi.registerCommand("memctx-llm", {
+		description: "Configure LLM assistance. Usage: /memctx-llm [off|assist|first|status]",
+		handler: async (args, ctx) => {
+			const target = (args ?? "status").trim().toLowerCase();
+			if (["off", "assist", "first"].includes(target)) {
+				llmMode = target as LlmMode;
+				llmStats.mode = llmMode;
+			} else if (target && target !== "status") {
+				ctx.ui.notify("memctx: Usage: /memctx-llm [off|assist|first|status]", "error");
+				return;
+			}
+			ctx.ui.notify(`memctx: LLM mode ${llmMode}. Calls this session: ${llmStats.callsThisSession}. Last: ${llmStats.lastUseCase ?? "none"}.`, "info");
+			ctx.ui.setStatus("memctx", buildStatusText());
 		},
 	});
 
@@ -1746,16 +2050,18 @@ export default function (pi: ExtensionAPI) {
 					return;
 				}
 
+				const from = activePack;
 				activePack = packName;
 				activePackPath = path.join(packsDir, packName);
 				qmdCollection = `memctx-${packName}`;
+				lastPackSwitch = { from, to: packName, reason: "manual /pack selection", confidence: "high", timestamp: nowTimestamp() };
 
 				if (qmdAvailable) {
 					qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 				}
 
 				ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
-				ctx.ui.setStatus("memctx", `📦 ${activePack}`);
+				ctx.ui.setStatus("memctx", buildStatusText());
 				return;
 			}
 
@@ -1770,16 +2076,18 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
+			const from = activePack;
 			activePack = target;
 			activePackPath = path.join(packsDir, target);
 			qmdCollection = `memctx-${target}`;
+			lastPackSwitch = { from, to: target, reason: "manual /pack argument", confidence: "high", timestamp: nowTimestamp() };
 
 			if (qmdAvailable) {
 				qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 			}
 
 			ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
-			ctx.ui.setStatus("memctx", `📦 ${activePack}`);
+			ctx.ui.setStatus("memctx", buildStatusText());
 		},
 	});
 
@@ -1850,7 +2158,8 @@ export default function (pi: ExtensionAPI) {
 			activePack = slug;
 			activePackPath = packPath;
 			qmdCollection = `memctx-${slug}`;
-			ctx.ui.setStatus("memctx", `📦 ${activePack}`);
+			lastPackSwitch = { from: "", to: slug, reason: "generated new pack", confidence: "high", timestamp: nowTimestamp() };
+			ctx.ui.setStatus("memctx", buildStatusText());
 		},
 	});
 
