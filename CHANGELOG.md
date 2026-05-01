@@ -6,9 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+
+## [0.5.4] - 2026-05-01
+
 ### Fixed
 
 - Fixed the README release badge URL so Shields renders the latest GitHub Release instead of `invalid`.
+<!-- Automatically released from fix/readme-release-badge as a patch bump via #28. -->
 
 ## [0.5.3] - 2026-05-01
 
