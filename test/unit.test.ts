@@ -19,6 +19,7 @@ import {
 	_setVaultRoot,
 	buildNote,
 	buildPackContext,
+	llmArchitectureNote,
 	buildSessionHandoff,
 	detectActivePack,
 	findVaultRoot,
@@ -1160,6 +1161,31 @@ describe("slugify", () => {
 		expect(slugify("a".repeat(100)).length).toBeLessThanOrEqual(60);
 	});
 });
+
+describe("llmArchitectureNote", () => {
+	test("tolerates missing optional arrays from LLM output", () => {
+		const note = llmArchitectureNote("demo", {
+			name: "Demo Repo",
+			slug: "demo-repo",
+			description: "Demo description",
+			observations: ["Observed fallback architecture."],
+		} as any, {
+			summary: "LLM summary",
+			domains: [{ name: "api", responsibility: "HTTP API" }],
+			integrations: undefined,
+			envVars: "DATABASE_URL",
+		} as any, ["src/index.ts"], "2026-05-01");
+
+		expect(note).toContain("LLM summary");
+		expect(note).toContain("| api | HTTP API | - |");
+		expect(note).toContain("No high-confidence integrations identified");
+		expect(note).toContain("No environment variables identified");
+	});
+});
+
+// ==========================================================================
+// 14. buildNote
+// ==========================================================================
 
 describe("buildNote", () => {
 	test("generates valid frontmatter", () => {
