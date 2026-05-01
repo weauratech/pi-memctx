@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx profile:full.
-#
-# This intentionally does not add any extension slash commands. It runs Pi in print
-# mode and isolates the extension/config with environment variables.
+# Captures JSON-mode events so tool calls and provider token usage can be measured.
 #
 # Usage:
 #   bash benchmark/setup.sh [base_dir]
@@ -10,7 +8,7 @@
 #
 # Optional env:
 #   BENCH_PROFILES="baseline full"   # default
-#   BENCH_REPEATS=1                  # default
+#   BENCH_REPEATS=2                  # default
 #   BENCH_PI_MODEL="provider/model"  # optional pass-through to pi --model
 #   BENCH_TIMEOUT=180                # seconds per task
 
@@ -20,15 +18,9 @@ BASE_DIR="${1:-/tmp/pi-memctx-benchmark}"
 RESULTS_DIR="$BASE_DIR/results"
 EXTENSION_PATH="$(cd "$(dirname "$0")/.." && pwd)"
 BENCH_PROFILES="${BENCH_PROFILES:-baseline full}"
-BENCH_REPEATS="${BENCH_REPEATS:-1}"
+BENCH_REPEATS="${BENCH_REPEATS:-2}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-180}"
 BENCH_RUN_ID="$(date +%Y%m%d-%H%M%S)"
-TIMEOUT_BIN=""
-if command -v timeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="timeout"
-elif command -v gtimeout >/dev/null 2>&1; then
-  TIMEOUT_BIN="gtimeout"
-fi
 SUMMARY_JSONL="$RESULTS_DIR/summary-$BENCH_RUN_ID.jsonl"
 SUMMARY_MD="$RESULTS_DIR/report-$BENCH_RUN_ID.md"
 
@@ -39,11 +31,12 @@ if [ ! -d "$BASE_DIR/repos" ]; then
   exit 1
 fi
 
-add_model_args() {
-  if [ -n "${BENCH_PI_MODEL:-}" ]; then
-    printf '%s\0%s\0' --model "$BENCH_PI_MODEL"
-  fi
-}
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
 
 TASK_IDS=(
   "deploy"
@@ -137,11 +130,100 @@ JSON
 }
 JSON
       ;;
-    *)
-      echo "Unknown profile: $profile" >&2
-      return 1
-      ;;
+    *) echo "Unknown profile: $profile" >&2; return 1 ;;
   esac
+}
+
+run_pi_json() {
+  local profile="$1"
+  local prompt="$2"
+  local json_file="$3"
+  local config_file="$4"
+  local cmd=(pi -p --mode json --no-session --no-extensions --no-prompt-templates --no-skills)
+
+  if [ "$profile" != "baseline" ]; then
+    cmd+=(-e "$EXTENSION_PATH")
+  fi
+  if [ -n "${BENCH_PI_MODEL:-}" ]; then
+    cmd+=(--model "$BENCH_PI_MODEL")
+  fi
+  cmd+=("$prompt")
+
+  cd "$BASE_DIR/repos/novapay-api"
+  if [ "$profile" = "baseline" ]; then
+    if [ -n "$TIMEOUT_BIN" ]; then
+      "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$json_file" 2>&1 || true
+    else
+      "${cmd[@]}" > "$json_file" 2>&1 || true
+    fi
+  else
+    if [ -n "$TIMEOUT_BIN" ]; then
+      MEMCTX_PACKS_PATH="$BASE_DIR/packs" MEMCTX_CONFIG_PATH="$config_file" \
+        "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$json_file" 2>&1 || true
+    else
+      MEMCTX_PACKS_PATH="$BASE_DIR/packs" MEMCTX_CONFIG_PATH="$config_file" \
+        "${cmd[@]}" > "$json_file" 2>&1 || true
+    fi
+  fi
+}
+
+extract_json_metrics() {
+  local json_file="$1"
+  local text_file="$2"
+  local metrics_tmp="$3"
+  python3 - "$json_file" "$text_file" "$metrics_tmp" <<'PY'
+import json, sys
+json_file, text_file, metrics_file = sys.argv[1:4]
+events=[]
+for line in open(json_file, errors='ignore'):
+    line=line.strip()
+    if not line or not line.startswith('{'):
+        continue
+    try:
+        events.append(json.loads(line))
+    except Exception:
+        pass
+assistant_text=""
+usage={"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"total":0}}
+for e in events:
+    msg=e.get('message')
+    if isinstance(msg, dict) and msg.get('role')=='assistant':
+        parts=[]
+        for c in msg.get('content') or []:
+            if isinstance(c, dict) and c.get('type')=='text':
+                parts.append(c.get('text') or '')
+        if parts:
+            assistant_text='\n'.join(parts)
+        if isinstance(msg.get('usage'), dict):
+            usage=msg['usage']
+# Count actual tool executions. Assistant message updates repeat accumulated content,
+# so only tool_execution_start is used to avoid duplicate counts.
+tool_starts=0
+tool_names=[]
+failed_tools=0
+for e in events:
+    t=e.get('type','')
+    if t == 'tool_execution_start':
+        tool_starts += 1
+        tool_names.append(e.get('toolName') or e.get('tool_name') or e.get('name') or 'tool')
+    if t in ('tool_execution_end','tool_result') and (e.get('isError') or e.get('error')):
+        failed_tools += 1
+open(text_file,'w').write(assistant_text)
+metrics={
+  'json_events': len(events),
+  'tool_calls_observed': tool_starts,
+  'tool_names': tool_names,
+  'failed_tool_calls_observed': failed_tools,
+  'usage_input_tokens': int(usage.get('input') or 0),
+  'usage_output_tokens': int(usage.get('output') or 0),
+  'usage_cache_read_tokens': int(usage.get('cacheRead') or 0),
+  'usage_cache_write_tokens': int(usage.get('cacheWrite') or 0),
+  'usage_total_tokens': int(usage.get('totalTokens') or 0),
+  'usage_cost_total': (usage.get('cost') or {}).get('total') or 0,
+  'assistant_text_chars': len(assistant_text),
+}
+open(metrics_file,'w').write(json.dumps(metrics))
+PY
 }
 
 score_quality() {
@@ -191,117 +273,92 @@ score_quality() {
   echo "$score $max_score"
 }
 
-count_tool_calls() {
-  local output_file="$1"
-  grep -Eic 'tool[_ -]?call|running tool|\$ |read\(|bash\(|edit\(|write\(' "$output_file" 2>/dev/null || true
-}
-
 run_one() {
   local profile="$1"
   local repeat="$2"
   local task_id="$3"
   local prompt="$4"
-
   local label="${profile}_r${repeat}"
-  local output_file="$RESULTS_DIR/${task_id}_${label}.txt"
+  local json_file="$RESULTS_DIR/${task_id}_${label}.jsonl"
+  local text_file="$RESULTS_DIR/${task_id}_${label}.txt"
   local metrics_file="$RESULTS_DIR/${task_id}_${label}_metrics.json"
+  local extracted_metrics="$RESULTS_DIR/${task_id}_${label}_events.json"
   local config_file="$RESULTS_DIR/memctx-config-${profile}-${repeat}.json"
-  local session_dir="$RESULTS_DIR/sessions-${profile}-${repeat}-${task_id}"
-  mkdir -p "$session_dir"
 
   echo "  ⏱  $task_id [$profile repeat=$repeat]"
+  if [ "$profile" != "baseline" ]; then profile_config "$profile" "$config_file"; fi
+
   local start_ns end_ns duration_ms
   start_ns=$(date +%s%N)
-
-  cd "$BASE_DIR/repos/novapay-api"
-  if [ "$profile" = "baseline" ]; then
-    cmd=(pi -p --no-session --no-extensions --no-prompt-templates --no-skills)
-    if [ -n "${BENCH_PI_MODEL:-}" ]; then cmd+=(--model "$BENCH_PI_MODEL"); fi
-    cmd+=("$prompt")
-    if [ -n "$TIMEOUT_BIN" ]; then
-      "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$output_file" 2>&1 || true
-    else
-      "${cmd[@]}" > "$output_file" 2>&1 || true
-    fi
-  else
-    profile_config "$profile" "$config_file"
-    cmd=(pi -p --no-session --no-extensions --no-prompt-templates --no-skills -e "$EXTENSION_PATH")
-    if [ -n "${BENCH_PI_MODEL:-}" ]; then cmd+=(--model "$BENCH_PI_MODEL"); fi
-    cmd+=("$prompt")
-    if [ -n "$TIMEOUT_BIN" ]; then
-      MEMCTX_PACKS_PATH="$BASE_DIR/packs" \
-      MEMCTX_CONFIG_PATH="$config_file" \
-      "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$output_file" 2>&1 || true
-    else
-      MEMCTX_PACKS_PATH="$BASE_DIR/packs" \
-      MEMCTX_CONFIG_PATH="$config_file" \
-      "${cmd[@]}" > "$output_file" 2>&1 || true
-    fi
-  fi
-
+  run_pi_json "$profile" "$prompt" "$json_file" "$config_file"
   end_ns=$(date +%s%N)
   duration_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-  local output_chars prompt_chars approx_output_tokens approx_prompt_tokens approx_visible_tokens tool_calls score max_score
-  output_chars=$(wc -c < "$output_file" | tr -d ' ')
-  prompt_chars=${#prompt}
-  approx_output_tokens=$(( (output_chars + 3) / 4 ))
-  approx_prompt_tokens=$(( (prompt_chars + 3) / 4 ))
-  approx_visible_tokens=$(( approx_output_tokens + approx_prompt_tokens ))
-  tool_calls=$(count_tool_calls "$output_file")
-  read -r score max_score < <(score_quality "$task_id" "$output_file")
+  extract_json_metrics "$json_file" "$text_file" "$extracted_metrics"
+  read -r score max_score < <(score_quality "$task_id" "$text_file")
 
-  cat > "$metrics_file" <<JSON
-{
+  python3 - "$extracted_metrics" "$metrics_file" <<PY
+import json, sys
+extra=json.load(open(sys.argv[1]))
+row={
   "run_id": "$BENCH_RUN_ID",
   "task": "$task_id",
   "profile": "$profile",
   "repeat": $repeat,
   "duration_ms": $duration_ms,
-  "prompt_chars": $prompt_chars,
-  "output_chars": $output_chars,
-  "approx_prompt_tokens": $approx_prompt_tokens,
-  "approx_output_tokens": $approx_output_tokens,
-  "approx_visible_tokens": $approx_visible_tokens,
-  "tool_calls_observed": $tool_calls,
+  "prompt_chars": ${#prompt},
   "quality_score": $score,
   "quality_max": $max_score,
-  "output_file": "$output_file"
+  "output_file": "$text_file",
+  "json_file": "$json_file",
 }
-JSON
+row.update(extra)
+row["approx_visible_tokens"]=(row["prompt_chars"] + row["assistant_text_chars"] + 3)//4
+open(sys.argv[2],'w').write(json.dumps(row, indent=2)+"\n")
+print(json.dumps(row, separators=(',', ':')))
+PY
+  tail -1 "$metrics_file" 2>/dev/null >/dev/null || true
   python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(',', ':')))" "$metrics_file" >> "$SUMMARY_JSONL"
-  echo "     ✅ ${duration_ms}ms | ~${approx_visible_tokens} visible tokens | tools:${tool_calls} | quality:${score}/${max_score}"
+
+  local total_tokens input_tokens output_tokens cache_read cache_write tool_calls failed_tools visible_tokens
+  total_tokens=$(python3 -c "import json;print(json.load(open('$metrics_file'))['usage_total_tokens'])")
+  input_tokens=$(python3 -c "import json;print(json.load(open('$metrics_file'))['usage_input_tokens'])")
+  output_tokens=$(python3 -c "import json;print(json.load(open('$metrics_file'))['usage_output_tokens'])")
+  cache_read=$(python3 -c "import json;print(json.load(open('$metrics_file'))['usage_cache_read_tokens'])")
+  cache_write=$(python3 -c "import json;print(json.load(open('$metrics_file'))['usage_cache_write_tokens'])")
+  tool_calls=$(python3 -c "import json;print(json.load(open('$metrics_file'))['tool_calls_observed'])")
+  failed_tools=$(python3 -c "import json;print(json.load(open('$metrics_file'))['failed_tool_calls_observed'])")
+  visible_tokens=$(python3 -c "import json;print(json.load(open('$metrics_file'))['approx_visible_tokens'])")
+
+  echo "     ✅ ${duration_ms}ms | provider tokens:${total_tokens} (in:${input_tokens} out:${output_tokens} cacheR:${cache_read} cacheW:${cache_write}) | visible~${visible_tokens} | tools:${tool_calls}/${failed_tools} failed | quality:${score}/${max_score}"
 }
 
 write_report() {
   python3 - "$SUMMARY_JSONL" "$SUMMARY_MD" <<'PY'
-import json, sys, collections, statistics
+import json, sys, collections
 jsonl, md = sys.argv[1], sys.argv[2]
-rows = [json.loads(line) for line in open(jsonl) if line.strip()]
-by = collections.defaultdict(list)
-for r in rows:
-    by[r["profile"]].append(r)
-
-def avg(xs): return sum(xs) / len(xs) if xs else 0
-lines = []
-lines.append("# pi-memctx local benchmark report\n")
-lines.append("\n| Profile | Runs | Avg ms | Avg visible tokens* | Avg tools | Quality |\n|---|---:|---:|---:|---:|---:|\n")
-for profile in sorted(by.keys()):
-    rs = by[profile]
-    q = sum(r['quality_score'] for r in rs)
-    qm = sum(r['quality_max'] for r in rs)
-    lines.append(f"| {profile} | {len(rs)} | {avg([r['duration_ms'] for r in rs]):.0f} | {avg([r['approx_visible_tokens'] for r in rs]):.0f} | {avg([r['tool_calls_observed'] for r in rs]):.1f} | {q}/{qm} |\n")
-lines.append("\n*Visible tokens are approximated from prompt+output chars/4. Provider-side hidden/system/context tokens require provider/Pi usage instrumentation and are not included.\n")
+rows=[json.loads(line) for line in open(jsonl) if line.strip()]
+by=collections.defaultdict(list)
+for r in rows: by[r['profile']].append(r)
+def avg(rs,k): return sum(r.get(k,0) for r in rs)/len(rs) if rs else 0
+def total(rs,k): return sum(r.get(k,0) for r in rs)
+lines=[]
+lines.append('# pi-memctx local benchmark report\n')
+lines.append('\n| Profile | Runs | Avg ms | Provider tokens | In | Out | Cache R/W | Visible* | Tools | Failed | Quality |\n')
+lines.append('|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n')
+for p in sorted(by):
+    rs=by[p]
+    lines.append(f"| {p} | {len(rs)} | {avg(rs,'duration_ms'):.0f} | {avg(rs,'usage_total_tokens'):.0f} | {avg(rs,'usage_input_tokens'):.0f} | {avg(rs,'usage_output_tokens'):.0f} | {avg(rs,'usage_cache_read_tokens'):.0f}/{avg(rs,'usage_cache_write_tokens'):.0f} | {avg(rs,'approx_visible_tokens'):.0f} | {avg(rs,'tool_calls_observed'):.1f} | {avg(rs,'failed_tool_calls_observed'):.1f} | {total(rs,'quality_score')}/{total(rs,'quality_max')} |\n")
+lines.append('\n*Visible tokens are approximated from prompt+assistant text chars/4. Provider tokens come from Pi JSON usage events.\n')
 if 'baseline' in by:
-    b = by['baseline']
-    for profile in sorted(k for k in by if k != 'baseline'):
-        rs = by[profile]
-        lines.append(f"\n## {profile} vs baseline\n")
-        lines.append(f"- Δ avg ms: {avg([r['duration_ms'] for r in rs]) - avg([r['duration_ms'] for r in b]):+.0f}\n")
-        lines.append(f"- Δ avg visible tokens: {avg([r['approx_visible_tokens'] for r in rs]) - avg([r['approx_visible_tokens'] for r in b]):+.0f}\n")
-        lines.append(f"- Δ avg tools: {avg([r['tool_calls_observed'] for r in rs]) - avg([r['tool_calls_observed'] for r in b]):+.1f}\n")
-        lines.append(f"- Δ quality: {sum(r['quality_score'] for r in rs) - sum(r['quality_score'] for r in b):+d}\n")
-open(md, 'w').write(''.join(lines))
+    b=by['baseline']
+    for p in sorted(k for k in by if k!='baseline'):
+        rs=by[p]
+        lines.append(f"\n## {p} vs baseline\n")
+        for label,key in [('avg ms','duration_ms'),('provider tokens','usage_total_tokens'),('input tokens','usage_input_tokens'),('output tokens','usage_output_tokens'),('cache read','usage_cache_read_tokens'),('cache write','usage_cache_write_tokens'),('visible tokens','approx_visible_tokens'),('tools','tool_calls_observed'),('failed tools','failed_tool_calls_observed')]:
+            lines.append(f"- Δ {label}: {avg(rs,key)-avg(b,key):+.1f}\n")
+        lines.append(f"- Δ quality facts: {total(rs,'quality_score')-total(b,'quality_score'):+d}\n")
+open(md,'w').write(''.join(lines))
 print('Report:', md)
 PY
 }
@@ -318,6 +375,7 @@ Profiles:     $BENCH_PROFILES
 Repeats:      $BENCH_REPEATS
 Results dir:  $RESULTS_DIR
 Run id:       $BENCH_RUN_ID
+JSON mode:    enabled
 
 HEADER
 
@@ -337,6 +395,7 @@ write_report
 echo ""
 echo "Results JSONL: $SUMMARY_JSONL"
 echo "Report:       $SUMMARY_MD"
-echo "Raw outputs:   $RESULTS_DIR/*_{baseline,full}_r*.txt"
+echo "Raw JSONL:     $RESULTS_DIR/*_{baseline,full}_r*.jsonl"
+echo "Raw text:      $RESULTS_DIR/*_{baseline,full}_r*.txt"
 echo ""
 cat "$SUMMARY_MD"
