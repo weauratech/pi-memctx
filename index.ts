@@ -285,6 +285,15 @@ export async function detectQmd(): Promise<boolean> {
 	return qmdAvailable;
 }
 
+function qmdExec(args: string[], timeout = 30000): Promise<{ ok: boolean; stdout: string }> {
+	if (!qmdBin) return Promise.resolve({ ok: false, stdout: "" });
+	return new Promise((resolve) => {
+		execFile(qmdBin, args, { timeout }, (err, stdout) => {
+			resolve({ ok: !err, stdout: stdout.trim() });
+		});
+	});
+}
+
 export async function qmdSearch(
 	query: string,
 	collection: string,
@@ -292,28 +301,29 @@ export async function qmdSearch(
 	mode: SearchMode = "keyword",
 ): Promise<string> {
 	if (!qmdAvailable || !qmdBin) return "";
-	return new Promise((resolve) => {
-		const args = ["search", query, "-n", String(limit), "-c", collection];
-		if (mode === "semantic") args.push("--semantic");
-		else if (mode === "deep") args.push("--deep");
-
-		execFile(qmdBin, args, { timeout: mode === "deep" ? 15000 : 5000 }, (err, stdout) => {
-			if (err) {
-				resolve("");
-				return;
-			}
-			resolve(stdout.trim());
-		});
-	});
+	const args =
+		mode === "deep"
+			? ["query", query, "-n", String(limit), "-c", collection]
+			: mode === "semantic"
+				? ["vsearch", query, "-n", String(limit), "-c", collection]
+				: ["search", query, "-n", String(limit), "-c", collection];
+	const result = await qmdExec(args, mode === "deep" ? 15000 : 5000);
+	return result.ok ? result.stdout : "";
 }
 
 export async function qmdEmbed(collection: string, packPath: string): Promise<boolean> {
 	if (!qmdAvailable || !qmdBin) return false;
-	return new Promise((resolve) => {
-		execFile(qmdBin, ["embed", "-c", collection, packPath], { timeout: 30000 }, (err) => {
-			resolve(!err);
-		});
-	});
+
+	const existing = await qmdExec(["collection", "show", collection], 5000);
+	const indexed = existing.ok
+		? await qmdExec(["update"], 30000)
+		: await qmdExec(["collection", "add", packPath, "--name", collection], 30000);
+	if (!indexed.ok) return false;
+
+	// Best effort: lexical qmd search works after indexing; embeddings enable semantic/deep modes.
+	// Keep this bounded so qmd never blocks Pi startup for long model downloads or native failures.
+	await qmdExec(["embed", "--max-docs-per-batch", "50", "--max-batch-mb", "25"], 30000);
+	return true;
 }
 
 export function grepSearchPack(packPath: string, query: string, limit = 5): { text: string; matchCount: number } {
@@ -350,7 +360,10 @@ export async function searchPackMemory(
 	mode: SearchMode = "keyword",
 ): Promise<{ text: string; mode: "qmd" | "grep-fallback" | "none"; matchCount: number }> {
 	if (qmdAvailable) {
-		const qmdResults = await qmdSearch(query, qmdCollection, limit, mode);
+		let qmdResults = await qmdSearch(query, qmdCollection, limit, mode);
+		if (!qmdResults.trim() && mode !== "keyword") {
+			qmdResults = await qmdSearch(query, qmdCollection, limit, "keyword");
+		}
 		if (qmdResults.trim()) {
 			return { text: qmdResults, mode: "qmd", matchCount: qmdResults.split("\n").filter((line) => line.trim()).length };
 		}
@@ -1547,7 +1560,7 @@ export default function (pi: ExtensionAPI) {
 		const sanitized = (event.prompt ?? "").replace(/[^\w\s.,?!-]/g, "").slice(0, 240).trim();
 
 		if (sanitized) {
-			const retrieval = await searchPackMemory(activePackPath, sanitized, 3, qmdAvailable ? "semantic" : "keyword");
+			const retrieval = await searchPackMemory(activePackPath, sanitized, 3, "keyword");
 			searchResults = retrieval.text;
 			retrievalMode = retrieval.mode;
 			resultCount = retrieval.matchCount;
