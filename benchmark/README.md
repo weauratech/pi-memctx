@@ -1,6 +1,8 @@
 # Benchmark
 
-Measure the real impact of pi-memctx on agent performance.
+Measure the local impact of pi-memctx inside your own Pi CLI.
+
+The benchmark compares the same tasks with **no extensions** (`baseline`) and with pi-memctx loaded using a profile such as `full`. It does not add extension slash commands; it runs Pi in print mode with isolated environment variables.
 
 ## Quick start
 
@@ -8,19 +10,27 @@ Measure the real impact of pi-memctx on agent performance.
 # 1. Setup fake project + pack
 bash benchmark/setup.sh
 
-# 2. Run benchmark (5 tasks × 2 modes)
+# 2. Run local comparison: baseline vs profile:full
 bash benchmark/run.sh
+```
+
+Optional:
+
+```bash
+BENCH_REPEATS=2 BENCH_PROFILES="baseline auto full" bash benchmark/run.sh
+BENCH_PI_MODEL="github-copilot/gpt-5.5" bash benchmark/run.sh
 ```
 
 ## What it measures
 
-Each task runs twice: once without pi-memctx (baseline) and once with it.
+Each task runs for each selected profile.
 
 | Metric | What it shows |
 |---|---|
-| **Duration** | Time to first complete response |
-| **Tool calls** | How many bash/read calls the agent needed |
-| **Quality score** | How many key facts the response contains |
+| **Duration** | End-to-end print-mode task duration |
+| **Observed tool calls** | Best-effort count from the raw Pi output |
+| **Quality score** | How many expected key facts the response contains |
+| **Approx visible tokens** | Approximation from prompt+output chars / 4 |
 
 ## Tasks
 
@@ -42,6 +52,16 @@ With pi-memctx:
 ## Output
 
 Results saved to `/tmp/pi-memctx-benchmark/results/`:
-- `*_baseline.txt` — raw agent output without extension
-- `*_memctx.txt` — raw agent output with extension
-- `*_metrics.json` — structured metrics per task
+
+- `*_baseline_r*.txt` — raw agent output without extensions
+- `*_full_r*.txt` — raw agent output with pi-memctx profile `full`
+- `*_metrics.json` — structured metrics per task/profile/repeat
+- `summary-<run-id>.jsonl` — machine-readable aggregate rows
+- `report-<run-id>.md` — human-readable report
+
+## Notes
+
+- The baseline uses `--no-extensions` so globally installed pi-memctx does not leak into the baseline.
+- The memctx run uses `--no-extensions -e <repo>` so only the local extension under test is loaded.
+- Profile config is isolated per run with `MEMCTX_CONFIG_PATH`.
+- Token counts are approximate visible tokens. Provider-side system/context/cache token usage requires provider/Pi usage instrumentation and is not included in this local script.
