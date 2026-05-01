@@ -266,25 +266,33 @@ These slash commands are available inside Pi after the extension loads.
 | Command | Usage | What |
 |---|---|---|
 | `/pack` | `/pack` or `/pack <name>` | List packs with a picker or switch directly. |
-| `/pack-status` | `/pack-status` | Show active pack, pack path, qmd status/source/bin/error, qmd collection, strict mode, file count, and last retrieval. |
+| `/pack-status` | `/pack-status` | Show active pack, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
 | `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. In strict mode, project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
-| `/pack-generate` | `/pack-generate [path] [slug]` | Generate a structured pack from a directory of repositories. |
+| `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
+| `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching and pack generation. |
+| `/pack-generate` | `/pack-generate [path] [slug]` | Generate a structured pack from a directory of repositories, with optional LLM deep enrichment. |
 
 ### `/pack-status` example
 
 ```txt
 Active pack: opensource
 Pack path: ~/.pi/agent/memory-vault/packs/opensource
-qmd: unavailable
+Auto-switch: cwd
+Selection: high (112)
+Last switch: none
+qmd: available
 qmd source: local-dependency
-qmd error: probe timed out
 Strict mode: off
-Last retrieval: grep-fallback
+LLM mode: assist
+LLM calls: 0
+Last retrieval: qmd
 ```
 
 ### `/pack-generate` discovery
 
-`/pack-generate` now performs deterministic local discovery before writing notes. It detects normal repos, hidden allowlist repos like `.github`, Git remotes, Node/TS and Go manifests, package scripts, safe commands, GitHub Actions, read-first docs, infra hints, placeholder repos, and redacts sensitive-looking values before persistence.
+`/pack-generate` performs deterministic local discovery before writing notes. It detects normal repos, hidden allowlist repos like `.github`, Git remotes, Node/TS and Go manifests, package scripts, safe commands, GitHub Actions, read-first docs, infra hints, placeholder repos, and redacts sensitive-looking values before persistence.
+
+When `MEMCTX_LLM_MODE=assist` or `first` and a model is selected, it then asks the LLM to select important files from compact inventories and synthesize architecture notes from redacted snippets.
 
 See [Pack generation](docs/pack-generate.md) for details.
 
@@ -297,6 +305,15 @@ cd ~/code/my-api       # → loads "my-api" pack
 cd ~/code/my-infra     # → loads "infra" pack
 cd ~/code              # → loads org-level pack
 ```
+
+Switch mid-session with `/pack`, or enable prompt-based switching:
+
+```txt
+/memctx-auto-switch all
+/memctx-llm first
+```
+
+`assist` mode uses deterministic matching first and asks the LLM for ambiguous prompt decisions. `first` mode asks the LLM whenever possible while keeping deterministic validation/fallbacks.
 
 Switch mid-session with `/pack`.
 
