@@ -1,37 +1,49 @@
 #!/usr/bin/env bash
-# Run pi-memctx benchmark: same tasks with and without the extension.
-# Measures token usage, tool calls, and response quality.
+# Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx profile:full.
 #
-# Usage: bash benchmark/run.sh [base_dir]
+# This intentionally does not add any extension slash commands. It runs Pi in print
+# mode and isolates the extension/config with environment variables.
 #
-# Prerequisites:
-#   - pi installed
-#   - bash benchmark/setup.sh already ran
+# Usage:
+#   bash benchmark/setup.sh [base_dir]
+#   bash benchmark/run.sh [base_dir]
+#
+# Optional env:
+#   BENCH_PROFILES="baseline full"   # default
+#   BENCH_REPEATS=1                  # default
+#   BENCH_PI_MODEL="provider/model"  # optional pass-through to pi --model
+#   BENCH_TIMEOUT=180                # seconds per task
 
 set -euo pipefail
 
 BASE_DIR="${1:-/tmp/pi-memctx-benchmark}"
 RESULTS_DIR="$BASE_DIR/results"
 EXTENSION_PATH="$(cd "$(dirname "$0")/.." && pwd)"
+BENCH_PROFILES="${BENCH_PROFILES:-baseline full}"
+BENCH_REPEATS="${BENCH_REPEATS:-1}"
+BENCH_TIMEOUT="${BENCH_TIMEOUT:-180}"
+BENCH_RUN_ID="$(date +%Y%m%d-%H%M%S)"
+TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  TIMEOUT_BIN="gtimeout"
+fi
+SUMMARY_JSONL="$RESULTS_DIR/summary-$BENCH_RUN_ID.jsonl"
+SUMMARY_MD="$RESULTS_DIR/report-$BENCH_RUN_ID.md"
 
 mkdir -p "$RESULTS_DIR"
 
 if [ ! -d "$BASE_DIR/repos" ]; then
-  echo "❌ Run setup first: bash benchmark/setup.sh"
+  echo "❌ Run setup first: bash benchmark/setup.sh $BASE_DIR"
   exit 1
 fi
 
-# ─────────────────────────────────────────────────────────
-# Tasks to benchmark
-# ─────────────────────────────────────────────────────────
-
-TASKS=(
-  "How do I deploy the gateway service to production?"
-  "What database pattern does the transactions service use?"
-  "What is the project architecture? What framework and language?"
-  "How do I add a new Terraform module for SQS?"
-  "What are the safe and dangerous commands for infrastructure?"
-)
+add_model_args() {
+  if [ -n "${BENCH_PI_MODEL:-}" ]; then
+    printf '%s\0%s\0' --model "$BENCH_PI_MODEL"
+  fi
+}
 
 TASK_IDS=(
   "deploy"
@@ -41,49 +53,102 @@ TASK_IDS=(
   "safe-commands"
 )
 
-# ─────────────────────────────────────────────────────────
-# Run a single task and capture metrics
-# ─────────────────────────────────────────────────────────
+TASKS=(
+  "How do I deploy the gateway service to production?"
+  "What database pattern does the transactions service use?"
+  "What is the project architecture? What framework and language?"
+  "How do I add a new Terraform module for SQS?"
+  "What are the safe and dangerous commands for infrastructure?"
+)
 
-run_task() {
-  local label="$1"    # "baseline" or "memctx"
-  local task_id="$2"
-  local prompt="$3"
-  local extra_flags="${4:-}"
+profile_config() {
+  local profile="$1"
+  local config_path="$2"
+  case "$profile" in
+    full)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "full",
+  "baseProfile": "full",
+  "strict": true,
+  "retrieval": "strict",
+  "retrievalLatencyBudgetMs": 3000,
+  "autosave": "auto",
+  "autosaveQueueLowConfidence": false,
+  "llm": "first",
+  "autoSwitch": "all",
+  "autoBootstrap": "ask",
+  "startupDoctor": "full",
+  "toolFailureHints": true
+}
+JSON
+      ;;
+    auto)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "auto",
+  "baseProfile": "auto",
+  "strict": true,
+  "retrieval": "auto",
+  "retrievalLatencyBudgetMs": 1000,
+  "autosave": "auto",
+  "autosaveQueueLowConfidence": false,
+  "llm": "assist",
+  "autoSwitch": "all",
+  "autoBootstrap": "ask",
+  "startupDoctor": "light",
+  "toolFailureHints": true
+}
+JSON
+      ;;
+    low)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "low",
+  "baseProfile": "low",
+  "strict": false,
+  "retrieval": "fast",
+  "retrievalLatencyBudgetMs": 300,
+  "autosave": "off",
+  "autosaveQueueLowConfidence": false,
+  "llm": "off",
+  "autoSwitch": "cwd",
+  "autoBootstrap": "ask",
+  "startupDoctor": "off",
+  "toolFailureHints": false
+}
+JSON
+      ;;
+    balanced)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "balanced",
+  "baseProfile": "balanced",
+  "strict": true,
+  "retrieval": "balanced",
+  "retrievalLatencyBudgetMs": 1000,
+  "autosave": "suggest",
+  "autosaveQueueLowConfidence": false,
+  "llm": "assist",
+  "autoSwitch": "all",
+  "autoBootstrap": "ask",
+  "startupDoctor": "light",
+  "toolFailureHints": true
+}
+JSON
+      ;;
+    *)
+      echo "Unknown profile: $profile" >&2
+      return 1
+      ;;
+  esac
+}
 
-  local output_file="$RESULTS_DIR/${task_id}_${label}.txt"
-  local metrics_file="$RESULTS_DIR/${task_id}_${label}_metrics.json"
-
-  echo "  ⏱  Running: $task_id ($label)"
-
-  local start_time
-  start_time=$(date +%s%N)
-
-  # Run pi in print mode with the task
-  cd "$BASE_DIR/repos/novapay-api"
-  timeout 120 pi -p $extra_flags "$prompt" > "$output_file" 2>&1 || true
-
-  local end_time
-  end_time=$(date +%s%N)
-  local duration_ms=$(( (end_time - start_time) / 1000000 ))
-
-  # Extract metrics from output
-  local total_chars
-  total_chars=$(wc -c < "$output_file" | tr -d ' ')
-
-  local tool_calls
-  tool_calls=$(grep -c '^ *\$ \|^bash\|^ *read ' "$output_file" 2>/dev/null || echo "0")
-
-  local read_calls
-  read_calls=$(grep -c '^ *read \|Reading:' "$output_file" 2>/dev/null || echo "0")
-
-  local bash_calls
-  bash_calls=$(grep -c '^ *\$ ' "$output_file" 2>/dev/null || echo "0")
-
-  # Check for key facts in response (quality scoring)
+score_quality() {
+  local task_id="$1"
+  local output_file="$2"
   local score=0
   local max_score=0
-
   case "$task_id" in
     deploy)
       max_score=5
@@ -123,170 +188,155 @@ run_task() {
       grep -qi "dangerous\|caution\|never\|careful" "$output_file" && ((score++)) || true
       ;;
   esac
-
-  # Write metrics JSON
-  cat > "$metrics_file" << METRICS_EOF
-{
-  "task": "$task_id",
-  "mode": "$label",
-  "duration_ms": $duration_ms,
-  "output_chars": $total_chars,
-  "tool_calls": $tool_calls,
-  "bash_calls": $bash_calls,
-  "read_calls": $read_calls,
-  "quality_score": $score,
-  "quality_max": $max_score
-}
-METRICS_EOF
-
-  echo "     ✅ ${duration_ms}ms | ${tool_calls} tools | quality: ${score}/${max_score}"
+  echo "$score $max_score"
 }
 
-# ─────────────────────────────────────────────────────────
-# Main
-# ─────────────────────────────────────────────────────────
+count_tool_calls() {
+  local output_file="$1"
+  grep -Eic 'tool[_ -]?call|running tool|\$ |read\(|bash\(|edit\(|write\(' "$output_file" 2>/dev/null || true
+}
 
-echo ""
-echo "═══════════════════════════════════════════════════"
-echo "  pi-memctx Benchmark"
-echo "═══════════════════════════════════════════════════"
-echo ""
-echo "Base dir:  $BASE_DIR"
-echo "Extension: $EXTENSION_PATH"
-echo "Tasks:     ${#TASKS[@]}"
-echo ""
+run_one() {
+  local profile="$1"
+  local repeat="$2"
+  local task_id="$3"
+  local prompt="$4"
 
-# --- Baseline (no extension) ---
-echo "── Phase 1: Baseline (no pi-memctx) ──"
-echo ""
-for i in "${!TASKS[@]}"; do
-  run_task "baseline" "${TASK_IDS[$i]}" "${TASKS[$i]}"
-done
+  local label="${profile}_r${repeat}"
+  local output_file="$RESULTS_DIR/${task_id}_${label}.txt"
+  local metrics_file="$RESULTS_DIR/${task_id}_${label}_metrics.json"
+  local config_file="$RESULTS_DIR/memctx-config-${profile}-${repeat}.json"
+  local session_dir="$RESULTS_DIR/sessions-${profile}-${repeat}-${task_id}"
+  mkdir -p "$session_dir"
 
-echo ""
+  echo "  ⏱  $task_id [$profile repeat=$repeat]"
+  local start_ns end_ns duration_ms
+  start_ns=$(date +%s%N)
 
-# --- With pi-memctx ---
-echo "── Phase 2: With pi-memctx ──"
-echo ""
-
-export MEMCTX_PACKS_PATH="$BASE_DIR/packs"
-
-for i in "${!TASKS[@]}"; do
-  run_task "memctx" "${TASK_IDS[$i]}" "${TASKS[$i]}" "-e $EXTENSION_PATH"
-done
-
-echo ""
-
-# ─────────────────────────────────────────────────────────
-# Results
-# ─────────────────────────────────────────────────────────
-
-echo "═══════════════════════════════════════════════════"
-echo "  Results"
-echo "═══════════════════════════════════════════════════"
-echo ""
-
-printf "%-20s │ %8s %8s │ %8s %8s │ %6s %6s │ %7s %7s\n" \
-  "Task" "ms(base)" "ms(ctx)" "tools(b)" "tools(c)" "q(base)" "q(ctx)" "Δtools" "Δqual"
-printf "%-20s─┼─%8s─%8s─┼─%8s─%8s─┼─%6s─%6s─┼─%7s─%7s\n" \
-  "────────────────────" "────────" "────────" "────────" "────────" "──────" "──────" "───────" "───────"
-
-total_base_tools=0
-total_ctx_tools=0
-total_base_quality=0
-total_ctx_quality=0
-total_base_ms=0
-total_ctx_ms=0
-
-for task_id in "${TASK_IDS[@]}"; do
-  base="$RESULTS_DIR/${task_id}_baseline_metrics.json"
-  ctx="$RESULTS_DIR/${task_id}_memctx_metrics.json"
-
-  if [ ! -f "$base" ] || [ ! -f "$ctx" ]; then
-    continue
+  cd "$BASE_DIR/repos/novapay-api"
+  if [ "$profile" = "baseline" ]; then
+    cmd=(pi -p --no-session --no-extensions --no-prompt-templates --no-skills)
+    if [ -n "${BENCH_PI_MODEL:-}" ]; then cmd+=(--model "$BENCH_PI_MODEL"); fi
+    cmd+=("$prompt")
+    if [ -n "$TIMEOUT_BIN" ]; then
+      "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$output_file" 2>&1 || true
+    else
+      "${cmd[@]}" > "$output_file" 2>&1 || true
+    fi
+  else
+    profile_config "$profile" "$config_file"
+    cmd=(pi -p --no-session --no-extensions --no-prompt-templates --no-skills -e "$EXTENSION_PATH")
+    if [ -n "${BENCH_PI_MODEL:-}" ]; then cmd+=(--model "$BENCH_PI_MODEL"); fi
+    cmd+=("$prompt")
+    if [ -n "$TIMEOUT_BIN" ]; then
+      MEMCTX_PACKS_PATH="$BASE_DIR/packs" \
+      MEMCTX_CONFIG_PATH="$config_file" \
+      "$TIMEOUT_BIN" "$BENCH_TIMEOUT" "${cmd[@]}" > "$output_file" 2>&1 || true
+    else
+      MEMCTX_PACKS_PATH="$BASE_DIR/packs" \
+      MEMCTX_CONFIG_PATH="$config_file" \
+      "${cmd[@]}" > "$output_file" 2>&1 || true
+    fi
   fi
 
-  b_ms=$(python3 -c "import json; print(json.load(open('$base'))['duration_ms'])")
-  c_ms=$(python3 -c "import json; print(json.load(open('$ctx'))['duration_ms'])")
-  b_tools=$(python3 -c "import json; print(json.load(open('$base'))['tool_calls'])")
-  c_tools=$(python3 -c "import json; print(json.load(open('$ctx'))['tool_calls'])")
-  b_qual=$(python3 -c "import json; d=json.load(open('$base')); print(f\"{d['quality_score']}/{d['quality_max']}\")")
-  c_qual=$(python3 -c "import json; d=json.load(open('$ctx')); print(f\"{d['quality_score']}/{d['quality_max']}\")")
-  b_q=$(python3 -c "import json; print(json.load(open('$base'))['quality_score'])")
-  c_q=$(python3 -c "import json; print(json.load(open('$ctx'))['quality_score'])")
+  end_ns=$(date +%s%N)
+  duration_ms=$(( (end_ns - start_ns) / 1000000 ))
 
-  d_tools=$((c_tools - b_tools))
-  d_qual=$((c_q - b_q))
+  local output_chars prompt_chars approx_output_tokens approx_prompt_tokens approx_visible_tokens tool_calls score max_score
+  output_chars=$(wc -c < "$output_file" | tr -d ' ')
+  prompt_chars=${#prompt}
+  approx_output_tokens=$(( (output_chars + 3) / 4 ))
+  approx_prompt_tokens=$(( (prompt_chars + 3) / 4 ))
+  approx_visible_tokens=$(( approx_output_tokens + approx_prompt_tokens ))
+  tool_calls=$(count_tool_calls "$output_file")
+  read -r score max_score < <(score_quality "$task_id" "$output_file")
 
-  d_tools_str="${d_tools}"
-  [ "$d_tools" -le 0 ] && d_tools_str="${d_tools}" || d_tools_str="+${d_tools}"
-  d_qual_str="${d_qual}"
-  [ "$d_qual" -le 0 ] && d_qual_str="${d_qual}" || d_qual_str="+${d_qual}"
+  cat > "$metrics_file" <<JSON
+{
+  "run_id": "$BENCH_RUN_ID",
+  "task": "$task_id",
+  "profile": "$profile",
+  "repeat": $repeat,
+  "duration_ms": $duration_ms,
+  "prompt_chars": $prompt_chars,
+  "output_chars": $output_chars,
+  "approx_prompt_tokens": $approx_prompt_tokens,
+  "approx_output_tokens": $approx_output_tokens,
+  "approx_visible_tokens": $approx_visible_tokens,
+  "tool_calls_observed": $tool_calls,
+  "quality_score": $score,
+  "quality_max": $max_score,
+  "output_file": "$output_file"
+}
+JSON
+  python3 -c "import json,sys; print(json.dumps(json.load(open(sys.argv[1])), separators=(',', ':')))" "$metrics_file" >> "$SUMMARY_JSONL"
+  echo "     ✅ ${duration_ms}ms | ~${approx_visible_tokens} visible tokens | tools:${tool_calls} | quality:${score}/${max_score}"
+}
 
-  printf "%-20s │ %8s %8s │ %8s %8s │ %6s %6s │ %7s %7s\n" \
-    "$task_id" "$b_ms" "$c_ms" "$b_tools" "$c_tools" "$b_qual" "$c_qual" "$d_tools_str" "$d_qual_str"
+write_report() {
+  python3 - "$SUMMARY_JSONL" "$SUMMARY_MD" <<'PY'
+import json, sys, collections, statistics
+jsonl, md = sys.argv[1], sys.argv[2]
+rows = [json.loads(line) for line in open(jsonl) if line.strip()]
+by = collections.defaultdict(list)
+for r in rows:
+    by[r["profile"]].append(r)
 
-  total_base_tools=$((total_base_tools + b_tools))
-  total_ctx_tools=$((total_ctx_tools + c_tools))
-  total_base_quality=$((total_base_quality + b_q))
-  total_ctx_quality=$((total_ctx_quality + c_q))
-  total_base_ms=$((total_base_ms + b_ms))
-  total_ctx_ms=$((total_ctx_ms + c_ms))
+def avg(xs): return sum(xs) / len(xs) if xs else 0
+lines = []
+lines.append("# pi-memctx local benchmark report\n")
+lines.append("\n| Profile | Runs | Avg ms | Avg visible tokens* | Avg tools | Quality |\n|---|---:|---:|---:|---:|---:|\n")
+for profile in sorted(by.keys()):
+    rs = by[profile]
+    q = sum(r['quality_score'] for r in rs)
+    qm = sum(r['quality_max'] for r in rs)
+    lines.append(f"| {profile} | {len(rs)} | {avg([r['duration_ms'] for r in rs]):.0f} | {avg([r['approx_visible_tokens'] for r in rs]):.0f} | {avg([r['tool_calls_observed'] for r in rs]):.1f} | {q}/{qm} |\n")
+lines.append("\n*Visible tokens are approximated from prompt+output chars/4. Provider-side hidden/system/context tokens require provider/Pi usage instrumentation and are not included.\n")
+if 'baseline' in by:
+    b = by['baseline']
+    for profile in sorted(k for k in by if k != 'baseline'):
+        rs = by[profile]
+        lines.append(f"\n## {profile} vs baseline\n")
+        lines.append(f"- Δ avg ms: {avg([r['duration_ms'] for r in rs]) - avg([r['duration_ms'] for r in b]):+.0f}\n")
+        lines.append(f"- Δ avg visible tokens: {avg([r['approx_visible_tokens'] for r in rs]) - avg([r['approx_visible_tokens'] for r in b]):+.0f}\n")
+        lines.append(f"- Δ avg tools: {avg([r['tool_calls_observed'] for r in rs]) - avg([r['tool_calls_observed'] for r in b]):+.1f}\n")
+        lines.append(f"- Δ quality: {sum(r['quality_score'] for r in rs) - sum(r['quality_score'] for r in b):+d}\n")
+open(md, 'w').write(''.join(lines))
+print('Report:', md)
+PY
+}
+
+cat <<HEADER
+
+═══════════════════════════════════════════════════
+  pi-memctx Local Benchmark: baseline vs profiles
+═══════════════════════════════════════════════════
+
+Base dir:     $BASE_DIR
+Extension:    $EXTENSION_PATH
+Profiles:     $BENCH_PROFILES
+Repeats:      $BENCH_REPEATS
+Results dir:  $RESULTS_DIR
+Run id:       $BENCH_RUN_ID
+
+HEADER
+
+for repeat in $(seq 1 "$BENCH_REPEATS"); do
+  echo "── Repeat $repeat/$BENCH_REPEATS ──"
+  for profile in $BENCH_PROFILES; do
+    echo "Profile: $profile"
+    for i in "${!TASKS[@]}"; do
+      run_one "$profile" "$repeat" "${TASK_IDS[$i]}" "${TASKS[$i]}"
+    done
+    echo ""
+  done
 done
 
-echo ""
-echo "── Summary ──"
-echo ""
-
-tool_diff=$((total_base_tools - total_ctx_tools))
-qual_diff=$((total_ctx_quality - total_base_quality))
-time_diff_ms=$((total_base_ms - total_ctx_ms))
-time_diff_s=$((time_diff_ms / 1000))
-
-echo "  Tool calls:   baseline=$total_base_tools  memctx=$total_ctx_tools  (saved $tool_diff calls)"
-echo "  Quality:      baseline=$total_base_quality  memctx=$total_ctx_quality  (+$qual_diff correct facts)"
-echo "  Time (ms):    baseline=$total_base_ms  memctx=$total_ctx_ms  (saved ${time_diff_s}s)"
+write_report
 
 echo ""
-echo "── What this means ──"
+echo "Results JSONL: $SUMMARY_JSONL"
+echo "Report:       $SUMMARY_MD"
+echo "Raw outputs:   $RESULTS_DIR/*_{baseline,full}_r*.txt"
 echo ""
-
-if [ $total_base_tools -gt 0 ]; then
-  tool_pct=$((tool_diff * 100 / total_base_tools))
-  echo "  🔧 ${tool_pct}% fewer tool calls"
-  echo "     → Each tool call costs tokens (input+output). Fewer calls = lower API cost."
-  echo "     → Estimated saving: ~${tool_diff} tool round-trips × ~500 tokens each = ~$((tool_diff * 500)) tokens saved."
-fi
-
-if [ $total_base_quality -gt 0 ] && [ $qual_diff -gt 0 ]; then
-  echo "  ✅ +${qual_diff} more correct facts in responses"
-  echo "     → Agent knows architecture, conventions, and runbooks without exploring."
-  echo "     → Fewer follow-up prompts needed to get useful output."
-fi
-
-if [ $time_diff_s -gt 0 ]; then
-  echo "  ⏱  ${time_diff_s}s faster across ${#TASKS[@]} tasks"
-  echo "     → Agent answers directly from memory instead of scanning the filesystem."
-fi
-
-echo ""
-echo "── ROI projection ──"
-echo ""
-echo "  If your team runs ~20 agent tasks/day:"
-if [ $total_base_tools -gt 0 ]; then
-  daily_tokens_saved=$((tool_diff * 500 * 20 / ${#TASKS[@]}))
-  monthly_tokens_saved=$((daily_tokens_saved * 22))
-  # Rough cost: $3 per 1M input tokens (Claude Sonnet)
-  monthly_cost_cents=$((monthly_tokens_saved * 3 / 10000))
-  echo "     Tokens saved/month:  ~${monthly_tokens_saved}"
-  echo "     Estimated savings:   ~\$${monthly_cost_cents}/month in API costs"
-fi
-if [ $time_diff_s -gt 0 ]; then
-  daily_time_saved=$((time_diff_s * 20 / ${#TASKS[@]}))
-  monthly_time_saved=$((daily_time_saved * 22 / 60))
-  echo "     Time saved/month:    ~${monthly_time_saved} minutes"
-fi
-echo "     Quality improvement:  agent gets it right on first try more often"
-echo ""
-echo "  Results saved to: $RESULTS_DIR/"
-echo ""
+cat "$SUMMARY_MD"
