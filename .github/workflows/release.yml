@@ -2,12 +2,11 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.3.0"
+        description: "Release tag, for example v0.4.0"
         required: true
         type: string
 
@@ -15,6 +14,11 @@ permissions:
   contents: write
   id-token: write
   packages: write
+  pull-requests: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -24,6 +28,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ github.token }}
 
       - uses: actions/setup-node@v6
         with:
@@ -33,38 +38,178 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Resolve release version
         id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
         shell: bash
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.tag }}"
+            TAG="$INPUT_TAG"
+            if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Release tag must look like v1.2.3. Got: $TAG" >&2
+              exit 1
+            fi
+
+            VERSION="${TAG#v}"
+            PKG_VERSION="$(node -p "require('./package.json').version")"
+            if [ "$VERSION" != "$PKG_VERSION" ]; then
+              echo "Tag version $VERSION does not match package.json version $PKG_VERSION" >&2
+              exit 1
+            fi
+
+            echo "mode=manual" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "release=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must look like v1.2.3. Got: $TAG" >&2
-            exit 1
+          SHA="${GITHUB_SHA}"
+          MESSAGE="$(git log -1 --pretty=%B "$SHA")"
+          PR_NUMBER="$(printf '%s\n' "$MESSAGE" | sed -nE 's/^Merge pull request #([0-9]+).*/\1/p' | head -n1)"
+          BRANCH=""
+          PR_TITLE=""
+          PR_URL=""
+
+          if [ -n "$PR_NUMBER" ]; then
+            PR_JSON="$(gh pr view "$PR_NUMBER" --json headRefName,title,url)"
+            BRANCH="$(node -e 'const p=JSON.parse(process.argv[1]); console.log(p.headRefName || "")' "$PR_JSON")"
+            PR_TITLE="$(node -e 'const p=JSON.parse(process.argv[1]); console.log(p.title || "")' "$PR_JSON")"
+            PR_URL="$(node -e 'const p=JSON.parse(process.argv[1]); console.log(p.url || "")' "$PR_JSON")"
           fi
 
-          VERSION="${TAG#v}"
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-
-          if [ "$VERSION" != "$PKG_VERSION" ]; then
-            echo "Tag version $VERSION does not match package.json version $PKG_VERSION" >&2
-            exit 1
+          if [ -z "$BRANCH" ]; then
+            BRANCH="$(printf '%s\n' "$MESSAGE" | sed -nE 's/^Merge pull request #[0-9]+ from [^/]+\/(.+)$/\1/p' | head -n1)"
           fi
 
+          if [ -z "$BRANCH" ]; then
+            echo "No merged PR branch found in the main push; skipping release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          BRANCH_KIND="$(printf '%s' "$BRANCH" | sed -E 's#^([^/-]+).*#\1#' | tr '[:upper:]' '[:lower:]')"
+          case "$BRANCH_KIND" in
+            feat|feature)
+              BUMP="minor"
+              ;;
+            fix|bugfix|hotfix)
+              BUMP="patch"
+              ;;
+            *)
+              echo "Merged branch '$BRANCH' does not start with feat/ or fix/; skipping release."
+              echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          CURRENT="$(node -p "require('./package.json').version")"
+          VERSION="$(node -e '
+            const [major, minor, patch] = process.argv[1].split(".").map(Number);
+            const bump = process.argv[2];
+            if (![major, minor, patch].every(Number.isInteger)) throw new Error(`Invalid version: ${process.argv[1]}`);
+            if (bump === "minor") console.log(`${major}.${minor + 1}.0`);
+            else if (bump === "patch") console.log(`${major}.${minor}.${patch + 1}`);
+            else throw new Error(`Invalid bump: ${bump}`);
+          ' "$CURRENT" "$BUMP")"
+          TAG="v$VERSION"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists; skipping release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "mode=auto" >> "$GITHUB_OUTPUT"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "pr_title=$PR_TITLE" >> "$GITHUB_OUTPUT"
+          echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when no release is required
+        if: steps.version.outputs.release != 'true'
+        run: echo "No release required for this push."
 
       - name: Install dependencies
+        if: steps.version.outputs.release == 'true'
         run: npm install --omit=optional --omit=peer --ignore-scripts --no-audit --no-fund --package-lock=false
 
+      - name: Apply automatic version bump
+        if: steps.version.outputs.release == 'true' && steps.version.outputs.mode == 'auto'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          BUMP: ${{ steps.version.outputs.bump }}
+          MERGED_BRANCH: ${{ steps.version.outputs.branch }}
+          PR_NUMBER: ${{ steps.version.outputs.pr_number }}
+          PR_TITLE: ${{ steps.version.outputs.pr_title }}
+          PR_URL: ${{ steps.version.outputs.pr_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm version "$VERSION" --no-git-tag-version
+
+          node <<'NODE'
+          const fs = require("fs");
+
+          const version = process.env.VERSION;
+          const today = new Date().toISOString().slice(0, 10);
+          const branch = process.env.MERGED_BRANCH || "unknown";
+          const bump = process.env.BUMP || "unknown";
+          const prNumber = process.env.PR_NUMBER || "";
+          const prTitle = process.env.PR_TITLE || `Merged ${branch}`;
+          const prUrl = process.env.PR_URL || "";
+          const path = "CHANGELOG.md";
+          const changelog = fs.readFileSync(path, "utf8");
+          const unreleasedHeading = "## [Unreleased]";
+          const start = changelog.indexOf(unreleasedHeading);
+
+          if (start === -1) {
+            throw new Error("CHANGELOG.md must contain ## [Unreleased]");
+          }
+
+          const afterHeading = start + unreleasedHeading.length;
+          const nextMatch = changelog.slice(afterHeading).match(/\n## \[/);
+          const next = nextMatch ? afterHeading + nextMatch.index : changelog.length;
+          const before = changelog.slice(0, afterHeading);
+          const unreleasedBody = changelog.slice(afterHeading, next).trim();
+          const after = changelog.slice(next);
+          const prRef = prNumber ? `#${prNumber}` : branch;
+          const prLink = prUrl && prNumber ? ` ([#${prNumber}](${prUrl}))` : prNumber ? ` (#${prNumber})` : "";
+          const fallback = `### Changed\n\n- ${prTitle}${prLink}.\n`;
+          const releaseBody = unreleasedBody || fallback;
+          const section = `\n\n## [${version}] - ${today}\n\n${releaseBody}\n`;
+          const note = `<!-- Automatically released from ${branch} as a ${bump} bump${prRef ? ` via ${prRef}` : ""}. -->`;
+
+          fs.writeFileSync(path, `${before}\n${section}${note}\n${after.replace(/^\n+/, "\n")}`);
+          NODE
+
+          git add package.json package-lock.json CHANGELOG.md
+          git commit -m "chore(release): $TAG [skip ci]"
+          git push origin HEAD:main
+          git tag "$TAG"
+          git push origin "$TAG"
+
       - name: Run CI
+        if: steps.version.outputs.release == 'true'
         run: npm run ci
 
       - name: Extract changelog
+        if: steps.version.outputs.release == 'true'
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -79,7 +224,18 @@ jobs:
             exit 1
           fi
 
+      - name: Ensure manual release tag exists
+        if: steps.version.outputs.release == 'true' && steps.version.outputs.mode == 'manual'
+        shell: bash
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
       - name: Pack
+        if: steps.version.outputs.release == 'true'
         id: pack
         shell: bash
         run: |
@@ -89,6 +245,7 @@ jobs:
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
 
       - name: Publish to npm with trusted publishing
+        if: steps.version.outputs.release == 'true'
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
@@ -100,6 +257,7 @@ jobs:
           npm publish "${{ steps.pack.outputs.file }}" --provenance --access public
 
       - name: Publish to GitHub Packages
+        if: steps.version.outputs.release == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ github.token }}
         shell: bash
@@ -137,6 +295,7 @@ jobs:
           npm publish --registry="$REGISTRY"
 
       - name: Create or update GitHub Release
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
