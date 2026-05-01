@@ -1666,13 +1666,13 @@ type LlmFileSelection = {
 
 type LlmRepoSynthesis = {
 	summary?: string;
-	architecture?: string[];
-	entrypoints?: string[];
-	domains?: Array<{ name: string; responsibility: string; files: string[] }>;
-	integrations?: string[];
-	envVars?: string[];
-	risks?: string[];
-	testing?: string[];
+	architecture?: unknown;
+	entrypoints?: unknown;
+	domains?: unknown;
+	integrations?: unknown;
+	envVars?: unknown;
+	risks?: unknown;
+	testing?: unknown;
 };
 
 function detectLanguage(rel: string): string {
@@ -1752,10 +1752,37 @@ async function synthesizeRepoWithLlm(repo: RepoEvidence, selectedFiles: string[]
 	});
 }
 
-function llmArchitectureNote(packSlug: string, repo: RepoEvidence, synthesis: LlmRepoSynthesis, selectedFiles: string[], today: string): string {
-	const domains = synthesis.domains?.length
-		? synthesis.domains.map((d) => `| ${d.name} | ${d.responsibility} | ${d.files.map((f) => `\`${f}\``).join(", ")} |`).join("\n")
-		: "| unknown | Insufficient evidence. | - |";
+function asStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value
+		.map((item) => typeof item === "string" ? item : item == null ? "" : String(item))
+		.map((item) => item.trim())
+		.filter(Boolean);
+}
+
+function asDomainRows(value: unknown): string {
+	if (!Array.isArray(value) || value.length === 0) return "| unknown | Insufficient evidence. | - |";
+	const rows = value.map((item) => {
+		if (!item || typeof item !== "object") return null;
+		const domain = item as { name?: unknown; responsibility?: unknown; files?: unknown };
+		const name = typeof domain.name === "string" && domain.name.trim() ? domain.name.trim() : "unknown";
+		const responsibility = typeof domain.responsibility === "string" && domain.responsibility.trim()
+			? domain.responsibility.trim()
+			: "Insufficient evidence.";
+		const files = asStringArray(domain.files).map((f) => `\`${f}\``).join(", ") || "-";
+		return `| ${name} | ${responsibility} | ${files} |`;
+	}).filter(Boolean);
+	return rows.length ? rows.join("\n") : "| unknown | Insufficient evidence. | - |";
+}
+
+export function llmArchitectureNote(packSlug: string, repo: RepoEvidence, synthesis: LlmRepoSynthesis, selectedFiles: string[], today: string): string {
+	const domains = asDomainRows(synthesis.domains);
+	const architecture = asStringArray(synthesis.architecture);
+	const entrypoints = asStringArray(synthesis.entrypoints);
+	const integrations = asStringArray(synthesis.integrations);
+	const envVars = asStringArray(synthesis.envVars);
+	const risks = asStringArray(synthesis.risks);
+	const testing = asStringArray(synthesis.testing);
 	return `---
 type: context-pack
 id: context.${packSlug}.${repo.slug}.llm-architecture
@@ -1785,11 +1812,11 @@ ${selectedFiles.map((f) => `- \`${f}\``).join("\n") || "- No files selected."}
 
 ## Architecture
 
-${(synthesis.architecture?.length ? synthesis.architecture : repo.observations).map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
+${(architecture.length ? architecture : repo.observations).map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
 
 ## Entry points
 
-${(synthesis.entrypoints ?? []).map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
+${entrypoints.map((x) => `- ${x}`).join("\n") || "- Unknown from available evidence."}
 
 ## Domains
 
@@ -1799,19 +1826,19 @@ ${domains}
 
 ## Integrations
 
-${(synthesis.integrations ?? []).map((x) => `- ${x}`).join("\n") || "- No high-confidence integrations identified."}
+${integrations.map((x) => `- ${x}`).join("\n") || "- No high-confidence integrations identified."}
 
 ## Environment variables referenced
 
-${(synthesis.envVars ?? []).map((x) => `- \`${x}\``).join("\n") || "- No environment variables identified from selected evidence."}
+${envVars.map((x) => `- \`${x}\``).join("\n") || "- No environment variables identified from selected evidence."}
 
 ## Risks and follow-ups
 
-${(synthesis.risks ?? []).map((x) => `- ${x}`).join("\n") || "- No specific risks identified from selected evidence."}
+${risks.map((x) => `- ${x}`).join("\n") || "- No specific risks identified from selected evidence."}
 
 ## Testing notes
 
-${(synthesis.testing ?? []).map((x) => `- ${x}`).join("\n") || "- Inspect repository tests and CI before changing behavior."}
+${testing.map((x) => `- ${x}`).join("\n") || "- Inspect repository tests and CI before changing behavior."}
 
 ## Related
 
