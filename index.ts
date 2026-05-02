@@ -1151,6 +1151,27 @@ function summarizeGatewayFacts(decision: GatewayJudgeDecision, candidates: Gatew
 	return [...new Set([...modelFacts, ...candidateFacts])].slice(0, broadProject ? 22 : 16);
 }
 
+function promptWithRecentConversation(prompt: string, ctx: ExtensionContext): string {
+	const current = prompt.trim();
+	try {
+		const branch = ctx.sessionManager.getBranch();
+		const recent: string[] = [];
+		for (const entry of branch.slice(-8)) {
+			if (entry.type !== "message") continue;
+			const msg = (entry as any).message;
+			const role = msg?.role;
+			if (role !== "user" && role !== "assistant") continue;
+			const text = messageContentText(msg.content, role === "assistant" ? 900 : 600).replace(/\s+/g, " ").trim();
+			if (!text || text === current) continue;
+			recent.push(`${role}: ${text}`);
+		}
+		if (recent.length === 0) return current;
+		return truncate(["Recent conversation for resolving follow-up prompts:", ...recent.slice(-5), "", `Current prompt: ${current}`].join("\n"), 3500);
+	} catch {
+		return current;
+	}
+}
+
 async function buildMemoryGatewayContext(packPath: string, prompt: string, searchResults: string, retrievalMode: RetrievalStatus["mode"], ctx: ExtensionContext): Promise<string> {
 	const broadProject = isBroadProjectPrompt(prompt);
 	const retrievedCandidates = parseGatewayCandidates(searchResults, retrievalMode);
@@ -3573,8 +3594,9 @@ export default function (pi: ExtensionAPI) {
 		let retrievalBudgetMs = retrievalLatencyBudgetMs;
 		let retrievalTimedOut = false;
 
-		if (event.prompt?.trim()) {
-			const retrieval = await retrieveForPrompt(event.prompt, ctx);
+		const retrievalPrompt = event.prompt?.trim() ? promptWithRecentConversation(event.prompt, ctx) : "";
+		if (retrievalPrompt) {
+			const retrieval = await retrieveForPrompt(retrievalPrompt, ctx);
 			searchResults = retrieval.text;
 			retrievalMode = retrieval.mode;
 			resultCount = retrieval.count;
@@ -3586,9 +3608,10 @@ export default function (pi: ExtensionAPI) {
 			retrievalTimedOut = retrieval.timedOut;
 		}
 
+		const promptForContext = retrievalPrompt || (event.prompt ?? "");
 		const packContext = ["gateway", "qmd-economy"].includes(contextPipeline)
-			? await buildMemoryGatewayContext(activePackPath, event.prompt ?? "", searchResults, retrievalMode, ctx)
-			: buildPackContext(activePackPath, searchResults, event.prompt ?? "");
+			? await buildMemoryGatewayContext(activePackPath, promptForContext, searchResults, retrievalMode, ctx)
+			: buildPackContext(activePackPath, searchResults, promptForContext);
 		if (!packContext) return;
 
 		lastRetrieval = {
