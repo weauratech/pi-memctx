@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.9.1] - 2026-05-02
+
+### Changed
+
+- Upgrade the post-turn memory curator with generic rich-discovery fan-out so large repository investigations can produce multiple complementary context, observation, runbook, decision, and action notes instead of one collapsed note.
+- Increase curator context for final assistant summaries and add generic rich-discovery detection based on tool usage, source paths, structured summaries, and durable project signals.
+
+
 ## [0.9.0] - 2026-05-02
 
 ### Added

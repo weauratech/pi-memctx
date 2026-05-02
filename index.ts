@@ -167,16 +167,24 @@ type MemoryCandidate = {
 	pack: string;
 };
 
+type MemoryCuratorCandidate = {
+	shouldSave?: boolean;
+	type?: NoteType;
+	title?: string;
+	content?: string;
+	tags?: string[];
+	confidence?: number;
+	reason?: string;
+};
+
 type MemoryCuratorResult = {
-	candidates?: Array<{
-		shouldSave?: boolean;
-		type?: NoteType;
-		title?: string;
-		content?: string;
-		tags?: string[];
-		confidence?: number;
-		reason?: string;
-	}>;
+	richDiscovery?: boolean;
+	candidates?: MemoryCuratorCandidate[];
+	contextUpdates?: MemoryCuratorCandidate[];
+	observations?: MemoryCuratorCandidate[];
+	runbooks?: MemoryCuratorCandidate[];
+	decisions?: MemoryCuratorCandidate[];
+	actions?: MemoryCuratorCandidate[];
 };
 
 type MemctxConfig = {
@@ -2246,29 +2254,46 @@ function messageContentText(content: unknown, maxChars = 4000): string {
 		const item = block as Record<string, unknown>;
 		if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
 		else if (item.type === "toolCall") parts.push(`[tool:${String(item.name ?? "unknown")}]`);
-		else if ((item.type === "toolResult" || item.type === "tool_result") && item.content) parts.push(`[tool-result] ${JSON.stringify(item.content).slice(0, 1200)}`);
+		else if ((item.type === "toolResult" || item.type === "tool_result") && item.content) parts.push(`[tool-result] ${JSON.stringify(item.content).slice(0, 1800)}`);
 	}
 	return truncate(sanitizeEvidence(parts.join("\n")), maxChars);
 }
 
-function collectTurnSnippets(messages: unknown[]): { snippets: string[]; hasToolCalls: boolean; hasWrites: boolean } {
+function durableSignalScore(text: string): number {
+	let score = 0;
+	if (/`[^`]+\/[^`]+`|\b[A-Za-z0-9_.-]+\/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\b/.test(text)) score += 2;
+	if (/```|^\s*[-*]\s+|^\s*\d+\./m.test(text)) score += 1;
+	if (/\b(runbook|workflow|pipeline|deploy|architecture|context|repository|service|module|config|business rule|domain|schema|migration|kubernetes|terraform|database|api|frontend|backend)\b/i.test(text)) score += 2;
+	if (/\b(always|never|required|must|convention|standard|approval|manual|safe|dangerous|rollback|source of truth)\b/i.test(text)) score += 1;
+	if (text.length > 1800) score += 1;
+	if (text.length > 4500) score += 2;
+	return score;
+}
+
+function collectTurnSnippets(messages: unknown[]): { snippets: string[]; hasToolCalls: boolean; hasWrites: boolean; richDiscovery: boolean } {
 	let hasToolCalls = false;
 	let hasWrites = false;
+	let toolCount = 0;
+	let signalScore = 0;
 	const snippets: string[] = [];
 	for (const msg of messages) {
 		const entry = msg && typeof msg === "object" ? msg as Record<string, unknown> : null;
 		const m = entry?.type === "message" && entry.message ? entry.message as Record<string, unknown> : entry;
 		if (!m) continue;
 		const role = String(m.role ?? "");
-		const text = messageContentText(m.content, role === "assistant" ? 5000 : 1600);
+		const text = messageContentText(m.content, role === "assistant" ? 12000 : 2200);
 		if (role === "user" && text) snippets.push(`User: ${text}`);
-		if (role === "assistant" && text) snippets.push(`Assistant: ${text}`);
+		if (role === "assistant" && text) {
+			snippets.push(`Assistant: ${text}`);
+			signalScore += durableSignalScore(text);
+		}
 		if (Array.isArray(m.content)) {
 			for (const block of m.content) {
 				if (!block || typeof block !== "object") continue;
 				const item = block as Record<string, unknown>;
 				if (item.type === "toolCall") {
 					hasToolCalls = true;
+					toolCount++;
 					const name = String(item.name ?? "unknown");
 					if (["write", "edit", "bash"].includes(name)) hasWrites = true;
 					snippets.push(`Tool: ${name}`);
@@ -2276,10 +2301,11 @@ function collectTurnSnippets(messages: unknown[]): { snippets: string[]; hasTool
 			}
 		}
 	}
-	return { snippets: snippets.slice(-24), hasToolCalls, hasWrites };
+	const richDiscovery = toolCount >= 3 || signalScore >= 5;
+	return { snippets: snippets.slice(-30), hasToolCalls, hasWrites, richDiscovery };
 }
 
-function normalizeCuratorCandidate(raw: NonNullable<MemoryCuratorResult["candidates"]>[number]): MemoryCandidate | null {
+function normalizeCuratorCandidate(raw: MemoryCuratorCandidate): MemoryCandidate | null {
 	if (!raw?.shouldSave || !raw.title || !raw.content || !NOTE_TYPES.includes(raw.type as NoteType)) return null;
 	const content = sanitizeEvidence(raw.content);
 	if (sensitivePatternHit(raw.title, content)) return null;
@@ -2296,7 +2322,7 @@ function normalizeCuratorCandidate(raw: NonNullable<MemoryCuratorResult["candida
 	};
 }
 
-async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: string[]): Promise<MemoryCandidate[]> {
+async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: string[], richDiscovery: boolean): Promise<MemoryCandidate[]> {
 	if (!ctx.model || snippets.length === 0) return [];
 	const generated = await completeJsonWithLlm<MemoryCuratorResult>(ctx, "memory-curator", [
 		"You are the post-turn memory curator for a coding agent.",
@@ -2304,10 +2330,33 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		"Extract durable future-use memory from the completed turn, if any.",
 		"Save only evidence-backed project/workspace knowledge, conventions, runbooks, architecture, business rules, completed actions, repository discoveries, or explicit durable user/team preferences.",
 		"Do not save transient chatter, generic programming advice, guesses, secrets, credentials, tokens, private keys, customer data, or sensitive payloads. If a secret-like value appeared, summarize only the risk without the value.",
-		"Prefer updating context/observation/runbook/decision notes over saving raw transcripts. Keep content concise but useful, with source paths when available.",
-		"Return ONLY JSON: {\"candidates\":[{\"shouldSave\":true,\"type\":\"context|decision|action|runbook|observation\",\"title\":\"...\",\"content\":\"...\",\"tags\":[...],\"confidence\":0..1,\"reason\":\"...\"}]}. Max 3 candidates.",
-	].join("\n"), { activePack, snippets: snippets.slice(-20) }, true);
-	return (generated?.candidates ?? []).map(normalizeCuratorCandidate).filter((x): x is MemoryCandidate => Boolean(x)).slice(0, 3);
+		"If this was a rich discovery turn, fan out into multiple complementary notes instead of collapsing everything into one note.",
+		"Use context for durable repo/component overviews, observation for factual discoveries/counts/caveats, runbook for repeatable procedures, decision for conventions or architectural choices, action for completed work.",
+		"When discovery is about an existing repo/component, make one context candidate whose title matches that repo/component so it can update related context instead of creating transcript noise.",
+		"Keep each note concise but independently useful. Include source paths when available. Do not copy secret values.",
+		"Return ONLY JSON with either candidates[] or category arrays: contextUpdates[], observations[], runbooks[], decisions[], actions[]. Each item: {shouldSave,type,title,content,tags[],confidence,reason}.",
+		"For simple turns return at most 3 total items. For rich discovery return up to 8 total items: at most 2 context, 3 observations, 3 runbooks, 1 decision, 1 action.",
+	].join("\n"), { activePack, richDiscovery, snippets: snippets.slice(-24) }, true);
+	const raw = [
+		...(generated?.candidates ?? []),
+		...(generated?.contextUpdates ?? []).map((item) => ({ ...item, type: item.type ?? "context" as NoteType })),
+		...(generated?.observations ?? []).map((item) => ({ ...item, type: item.type ?? "observation" as NoteType })),
+		...(generated?.runbooks ?? []).map((item) => ({ ...item, type: item.type ?? "runbook" as NoteType })),
+		...(generated?.decisions ?? []).map((item) => ({ ...item, type: item.type ?? "decision" as NoteType })),
+		...(generated?.actions ?? []).map((item) => ({ ...item, type: item.type ?? "action" as NoteType })),
+	];
+	const seen = new Set<string>();
+	const candidates: MemoryCandidate[] = [];
+	for (const item of raw) {
+		const candidate = normalizeCuratorCandidate(item);
+		if (!candidate) continue;
+		const key = `${candidate.type}:${slugify(candidate.title)}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		candidates.push(candidate);
+		if (candidates.length >= (richDiscovery ? 8 : 3)) break;
+	}
+	return candidates;
 }
 
 function deterministicMemoryCandidateFromTurn(snippets: string[], hasWrites: boolean): MemoryCandidate | null {
@@ -4427,19 +4476,20 @@ export default function (pi: ExtensionAPI) {
 		if (!activePackPath || !activePack || autosaveMode === "off") return;
 
 		const messages = (event as any).messages ?? [];
-		const { snippets, hasWrites } = collectTurnSnippets(messages);
+		const { snippets, hasWrites, richDiscovery } = collectTurnSnippets(messages);
 		if (snippets.length === 0) return;
 
-		let candidates = await curateMemoryCandidatesFromTurn(ctx, snippets);
+		let candidates = await curateMemoryCandidatesFromTurn(ctx, snippets, richDiscovery);
 		if (candidates.length === 0) {
 			const fallback = deterministicMemoryCandidateFromTurn(snippets, hasWrites);
 			if (fallback) candidates = [fallback];
 		}
 		if (candidates.length === 0) return;
 
+		const maxProcess = richDiscovery ? 8 : 3;
 		let savedCount = 0;
 		let queuedCount = 0;
-		for (const candidate of candidates) {
+		for (const candidate of candidates.slice(0, maxProcess)) {
 			if (sensitivePatternHit(candidate.title, candidate.content)) continue;
 			if (autosaveMode === "auto") {
 				if (candidate.confidence >= 0.78) {
