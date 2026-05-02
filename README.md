@@ -222,8 +222,8 @@ Recommended note types:
 | `/memctx-profile` | Show or apply the `gateway` profile. |
 | `/memctx-config` | Show current config. |
 | `/memctx-retrieval` | Configure retrieval policy. |
-| `/memctx-autosave` | Configure autosave behavior. |
-| `/memctx-save-queue` | Review queued memory candidates. |
+| `/memctx-autosave` | Advanced: configure automatic learning behavior. The default gateway profile uses conservative `auto`. |
+| `/memctx-save-queue` | Advanced: review queued lower-confidence memory candidates. |
 | `/memctx-doctor` | Diagnose qmd, packs, and configuration. |
 | `/memctx-pack-enrich` | Enrich a pack with deterministic repository inventory and optional LLM synthesis. Runs in the background. |
 

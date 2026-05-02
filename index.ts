@@ -167,6 +167,18 @@ type MemoryCandidate = {
 	pack: string;
 };
 
+type MemoryCuratorResult = {
+	candidates?: Array<{
+		shouldSave?: boolean;
+		type?: NoteType;
+		title?: string;
+		content?: string;
+		tags?: string[];
+		confidence?: number;
+		reason?: string;
+	}>;
+};
+
 type MemctxConfig = {
 	profile: MemctxProfile;
 	baseProfile?: Exclude<MemctxProfile, "custom">;
@@ -312,7 +324,7 @@ function memctxConfigPath(): string {
 
 function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
 	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
-		gateway: { profile: "gateway", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 800, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
+		gateway: { profile: "gateway", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 800, autosave: "auto", autosaveQueueLowConfidence: true, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
 	};
 	return { ...base[profile], baseProfile: profile };
 }
@@ -2223,6 +2235,96 @@ function saveMemoryCandidate(candidate: MemoryCandidate): { rel: string; action:
 	}
 	fs.writeFileSync(filePath, buildNote(activePack, candidate.type, candidate.title, body, candidate.tags), "utf-8");
 	return { rel: path.relative(activePackPath, filePath), action: "created" };
+}
+
+function messageContentText(content: unknown, maxChars = 4000): string {
+	if (typeof content === "string") return truncate(sanitizeEvidence(content), maxChars);
+	if (!Array.isArray(content)) return "";
+	const parts: string[] = [];
+	for (const block of content) {
+		if (!block || typeof block !== "object") continue;
+		const item = block as Record<string, unknown>;
+		if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
+		else if (item.type === "toolCall") parts.push(`[tool:${String(item.name ?? "unknown")}]`);
+		else if ((item.type === "toolResult" || item.type === "tool_result") && item.content) parts.push(`[tool-result] ${JSON.stringify(item.content).slice(0, 1200)}`);
+	}
+	return truncate(sanitizeEvidence(parts.join("\n")), maxChars);
+}
+
+function collectTurnSnippets(messages: unknown[]): { snippets: string[]; hasToolCalls: boolean; hasWrites: boolean } {
+	let hasToolCalls = false;
+	let hasWrites = false;
+	const snippets: string[] = [];
+	for (const msg of messages) {
+		const entry = msg && typeof msg === "object" ? msg as Record<string, unknown> : null;
+		const m = entry?.type === "message" && entry.message ? entry.message as Record<string, unknown> : entry;
+		if (!m) continue;
+		const role = String(m.role ?? "");
+		const text = messageContentText(m.content, role === "assistant" ? 5000 : 1600);
+		if (role === "user" && text) snippets.push(`User: ${text}`);
+		if (role === "assistant" && text) snippets.push(`Assistant: ${text}`);
+		if (Array.isArray(m.content)) {
+			for (const block of m.content) {
+				if (!block || typeof block !== "object") continue;
+				const item = block as Record<string, unknown>;
+				if (item.type === "toolCall") {
+					hasToolCalls = true;
+					const name = String(item.name ?? "unknown");
+					if (["write", "edit", "bash"].includes(name)) hasWrites = true;
+					snippets.push(`Tool: ${name}`);
+				}
+			}
+		}
+	}
+	return { snippets: snippets.slice(-24), hasToolCalls, hasWrites };
+}
+
+function normalizeCuratorCandidate(raw: NonNullable<MemoryCuratorResult["candidates"]>[number]): MemoryCandidate | null {
+	if (!raw?.shouldSave || !raw.title || !raw.content || !NOTE_TYPES.includes(raw.type as NoteType)) return null;
+	const content = sanitizeEvidence(raw.content);
+	if (sensitivePatternHit(raw.title, content)) return null;
+	return {
+		id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+		type: raw.type as NoteType,
+		title: truncate(raw.title, 120),
+		content,
+		tags: Array.isArray(raw.tags) ? raw.tags.map(String).slice(0, 8) : ["autolearn"],
+		confidence: typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : 0.7,
+		reason: raw.reason ?? "Memory curator candidate",
+		createdAt: nowTimestamp(),
+		pack: activePack,
+	};
+}
+
+async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: string[]): Promise<MemoryCandidate[]> {
+	if (!ctx.model || snippets.length === 0) return [];
+	const generated = await completeJsonWithLlm<MemoryCuratorResult>(ctx, "memory-curator", [
+		"You are the post-turn memory curator for a coding agent.",
+		"The user may write in any language. Judge semantically; do not rely on specific product, repo, or keyword names.",
+		"Extract durable future-use memory from the completed turn, if any.",
+		"Save only evidence-backed project/workspace knowledge, conventions, runbooks, architecture, business rules, completed actions, repository discoveries, or explicit durable user/team preferences.",
+		"Do not save transient chatter, generic programming advice, guesses, secrets, credentials, tokens, private keys, customer data, or sensitive payloads. If a secret-like value appeared, summarize only the risk without the value.",
+		"Prefer updating context/observation/runbook/decision notes over saving raw transcripts. Keep content concise but useful, with source paths when available.",
+		"Return ONLY JSON: {\"candidates\":[{\"shouldSave\":true,\"type\":\"context|decision|action|runbook|observation\",\"title\":\"...\",\"content\":\"...\",\"tags\":[...],\"confidence\":0..1,\"reason\":\"...\"}]}. Max 3 candidates.",
+	].join("\n"), { activePack, snippets: snippets.slice(-20) }, true);
+	return (generated?.candidates ?? []).map(normalizeCuratorCandidate).filter((x): x is MemoryCandidate => Boolean(x)).slice(0, 3);
+}
+
+function deterministicMemoryCandidateFromTurn(snippets: string[], hasWrites: boolean): MemoryCandidate | null {
+	if (!hasWrites) return null;
+	const content = `A Pi session made code or command changes. Review the session before relying on this note.\n\n${snippets.slice(-10).join("\n")}`;
+	if (sensitivePatternHit("Session changes", content)) return null;
+	return {
+		id: `mem-${Date.now().toString(36)}`,
+		type: "action",
+		title: `Session changes ${todayStr()}`,
+		content,
+		tags: ["autolearn", "session"],
+		confidence: 0.55,
+		reason: "Detected write/edit/bash activity",
+		createdAt: nowTimestamp(),
+		pack: activePack,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -4320,104 +4422,65 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
-	// --- agent_end: propose or save learnings ---
+	// --- agent_end: automatically curate durable learnings ---
 	pi.on("agent_end", async (event, ctx) => {
 		if (!activePackPath || !activePack || autosaveMode === "off") return;
 
 		const messages = (event as any).messages ?? [];
-		let hasToolCalls = false;
-		let hasWrites = false;
-		const snippets: string[] = [];
+		const { snippets, hasWrites } = collectTurnSnippets(messages);
+		if (snippets.length === 0) return;
 
-		for (const msg of messages) {
-			const m = msg.type === "message" ? msg.message : msg;
-			if (!m) continue;
-			if (m.role === "user" && typeof m.content === "string") snippets.push(`User: ${truncate(m.content, 300)}`);
-			if (m.role === "assistant" && Array.isArray(m.content)) {
-				for (const block of m.content) {
-					if (block.type === "text" && block.text) snippets.push(`Assistant: ${truncate(block.text, 300)}`);
-					if (block.type === "toolCall") {
-						hasToolCalls = true;
-						if (["write", "edit", "bash"].includes(block.name)) hasWrites = true;
-						snippets.push(`Tool: ${block.name}`);
+		let candidates = await curateMemoryCandidatesFromTurn(ctx, snippets);
+		if (candidates.length === 0) {
+			const fallback = deterministicMemoryCandidateFromTurn(snippets, hasWrites);
+			if (fallback) candidates = [fallback];
+		}
+		if (candidates.length === 0) return;
+
+		let savedCount = 0;
+		let queuedCount = 0;
+		for (const candidate of candidates) {
+			if (sensitivePatternHit(candidate.title, candidate.content)) continue;
+			if (autosaveMode === "auto") {
+				if (candidate.confidence >= 0.78) {
+					try {
+						const saved = saveMemoryCandidate(candidate);
+						savedCount++;
+						if (ctx.hasUI) ctx.ui.notify(`memctx: learned ${candidate.type}: ${saved.rel}`, "info");
+					} catch {
+						enqueueMemoryCandidate(candidate);
+						queuedCount++;
+					}
+				} else if (autosaveQueueLowConfidence) {
+					enqueueMemoryCandidate(candidate);
+					queuedCount++;
+				}
+				continue;
+			}
+
+			if (autosaveMode === "confirm" && ctx.hasUI) {
+				const approved = await ctx.ui.confirm("Save memory candidate?", `${candidate.type}: ${candidate.title}\n\n${truncate(candidate.content, 500)}`);
+				if (approved) {
+					try {
+						const saved = saveMemoryCandidate(candidate);
+						savedCount++;
+						ctx.ui.notify(`memctx: Saved ${candidate.type}: ${saved.rel}`, "info");
+						continue;
+					} catch (err) {
+						ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
 					}
 				}
 			}
+
+			enqueueMemoryCandidate(candidate);
+			queuedCount++;
 		}
 
-		if (!hasToolCalls && !hasWrites) return;
-		let candidate: MemoryCandidate | null = null;
-		if (llmMode !== "off" && ctx.model) {
-			const generated = await completeJsonWithLlm<Partial<MemoryCandidate> & { shouldSave?: boolean }>(ctx, "autosave-memory-candidate", [
-				"Decide whether this coding-agent turn contains durable memory worth saving.",
-				"Return ONLY JSON with shouldSave, type, title, content, tags[], confidence 0..1, reason.",
-				"Save only durable project knowledge: decisions, completed actions, conventions, runbooks, architecture/context. Do not save secrets or transient chatter.",
-			].join("\n"), { activePack, autosaveMode, snippets: snippets.slice(-20) });
-			if (generated?.shouldSave && generated.title && generated.content && NOTE_TYPES.includes(generated.type as NoteType)) {
-				candidate = {
-					id: `mem-${Date.now().toString(36)}`,
-					type: generated.type as NoteType,
-					title: generated.title,
-					content: generated.content,
-					tags: Array.isArray(generated.tags) ? generated.tags : ["autosave"],
-					confidence: typeof generated.confidence === "number" ? generated.confidence : 0.7,
-					reason: generated.reason ?? "LLM autosave candidate",
-					createdAt: nowTimestamp(),
-					pack: activePack,
-				};
-			}
-		}
-		if (!candidate && hasWrites) {
-			candidate = {
-				id: `mem-${Date.now().toString(36)}`,
-				type: "action",
-				title: `Session changes ${todayStr()}`,
-				content: `A Pi session made code or command changes. Review the session before relying on this note.\n\n${snippets.slice(-8).join("\n")}`,
-				tags: ["autosave", "session"],
-				confidence: 0.55,
-				reason: "Detected write/edit/bash activity",
-				createdAt: nowTimestamp(),
-				pack: activePack,
-			};
-		}
-		if (!candidate || sensitivePatternHit(candidate.title, candidate.content)) return;
-
-		if (autosaveMode === "auto") {
-			if (candidate.confidence >= 0.85) {
-				try {
-					const saved = saveMemoryCandidate(candidate);
-					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-					if (ctx.hasUI) ctx.ui.notify(`memctx: Autosaved ${candidate.type}: ${saved.rel}`, "info");
-				} catch {
-					enqueueMemoryCandidate(candidate);
-				}
-			} else if (autosaveQueueLowConfidence) {
-				enqueueMemoryCandidate(candidate);
-				if (ctx.hasUI) ctx.ui.notify(`memctx: Queued low-confidence autosave candidate: ${candidate.title}`, "info");
-			}
-			return;
-		}
-
-		if (autosaveMode === "confirm" && ctx.hasUI) {
-			const approved = await ctx.ui.confirm("Save memory candidate?", `${candidate.type}: ${candidate.title}\n\n${truncate(candidate.content, 500)}`);
-			if (approved) {
-				try {
-					const saved = saveMemoryCandidate(candidate);
-					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-					ctx.ui.notify(`memctx: Saved ${candidate.type}: ${saved.rel}`, "info");
-					return;
-				} catch (err) {
-					ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
-				}
-			}
-		}
-
-		enqueueMemoryCandidate(candidate);
-		if (ctx.hasUI) {
+		if ((savedCount > 0 || queuedCount > 0) && qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+		if (queuedCount > 0 && ctx.hasUI) {
 			ctx.ui.setWidget("memctx-learn", [
-				`\x1b[33m💡 memctx: Memory candidate queued (${candidate.type}, ${Math.round(candidate.confidence * 100)}%).\x1b[0m`,
-				`   ${candidate.title}`,
-				`   Review: /memctx-save-queue approve ${candidate.id}`,
+				`\x1b[33m💡 memctx: ${queuedCount} memory candidate${queuedCount === 1 ? "" : "s"} queued for review.\x1b[0m`,
+				"   Review later if needed.",
 			]);
 			setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-learn", []), 30000);
 		}
