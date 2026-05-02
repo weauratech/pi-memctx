@@ -185,6 +185,7 @@ type MemoryCuratorResult = {
 	runbooks?: MemoryCuratorCandidate[];
 	decisions?: MemoryCuratorCandidate[];
 	actions?: MemoryCuratorCandidate[];
+	sessions?: MemoryCuratorCandidate[];
 };
 
 type MemctxConfig = {
@@ -2151,7 +2152,7 @@ export function todayStr(): string {
 /**
  * Note types the agent can save to a pack.
  */
-const NOTE_TYPES = ["observation", "decision", "action", "runbook", "context"] as const;
+const NOTE_TYPES = ["observation", "decision", "action", "runbook", "context", "session"] as const;
 type NoteType = (typeof NOTE_TYPES)[number];
 
 /** Map note types to pack directories */
@@ -2161,6 +2162,7 @@ const NOTE_TYPE_DIRS: Record<NoteType, string[]> = {
 	action: ["40-actions"],
 	runbook: ["70-runbooks", "80-runbooks"],
 	context: ["20-context"],
+	session: ["80-sessions"],
 };
 
 /**
@@ -2298,6 +2300,7 @@ function exactContextTargetNote(candidate: MemoryCandidate): string | null {
 
 function findSimilarNote(candidate: MemoryCandidate): string | null {
 	if (!activePackPath) return null;
+	if (candidate.type === "session") return null;
 	const exactContext = exactContextTargetNote(candidate);
 	if (exactContext) return exactContext;
 	const stop = new Set(["repo", "repository", "service", "component", "application", "deploy", "deployment", "config", "context", "overview", "korporate"]);
@@ -2426,13 +2429,13 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		"Save only evidence-backed project/workspace knowledge, conventions, runbooks, architecture, business rules, completed actions, repository discoveries, or explicit durable user/team preferences.",
 		"Do not save transient chatter, generic programming advice, guesses, secrets, credentials, tokens, private keys, customer data, or sensitive payloads. If a secret-like value appeared, summarize only the risk without the value.",
 		"If this was a rich discovery turn, fan out into multiple complementary notes instead of collapsing everything into one note.",
-		"Use context for durable repo/component overviews, observation for factual discoveries/counts/caveats, runbook for repeatable procedures, decision for conventions or architectural choices, action for completed work.",
+		"Use context for durable repo/component overviews, observation for factual discoveries/counts/caveats, runbook for repeatable procedures, decision for conventions or architectural choices, action for completed work, session for a rich sanitized discovery snapshot when the final answer contains many durable details.",
 		"When discovery is about an existing repo/component, make one context candidate whose title matches that repo/component so it can update related context instead of creating transcript noise.",
 		"Prefer preserving discovered architecture/configuration specifics over terse summaries: component names, exact safe source paths, environment split, deploy files, scaling/probe/ingress patterns, and operational caveats should be persisted when evidence-backed.",
 		"When many details were discovered for one component, create or update a context note plus complementary observation/runbook notes rather than a shallow decision-only memory.",
 		"Keep each note concise but independently useful. Include source paths when available. Do not copy secret values.",
-		"Return ONLY JSON with either candidates[] or category arrays: contextUpdates[], observations[], runbooks[], decisions[], actions[]. Each item: {shouldSave,type,title,content,tags[],confidence,reason}.",
-		"For simple turns return at most 3 total items. For rich discovery return up to 8 total items: at most 2 context, 3 observations, 3 runbooks, 1 decision, 1 action.",
+		"Return ONLY JSON with either candidates[] or category arrays: contextUpdates[], observations[], runbooks[], decisions[], actions[], sessions[]. Each item: {shouldSave,type,title,content,tags[],confidence,reason}.",
+		"For simple turns return at most 3 total items. For rich discovery return up to 10 total items: at most 2 context, 3 observations, 3 runbooks, 1 decision, 1 action, 1 session.",
 	].join("\n"), { activePack, richDiscovery, snippets: snippets.slice(-24) }, true);
 	const raw = [
 		...(generated?.candidates ?? []),
@@ -2441,6 +2444,7 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		...(generated?.runbooks ?? []).map((item) => ({ ...item, type: item.type ?? "runbook" as NoteType })),
 		...(generated?.decisions ?? []).map((item) => ({ ...item, type: item.type ?? "decision" as NoteType })),
 		...(generated?.actions ?? []).map((item) => ({ ...item, type: item.type ?? "action" as NoteType })),
+		...(generated?.sessions ?? []).map((item) => ({ ...item, type: item.type ?? "session" as NoteType })),
 	];
 	const seen = new Set<string>();
 	const candidates: MemoryCandidate[] = [];
@@ -2451,7 +2455,7 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		if (seen.has(key)) continue;
 		seen.add(key);
 		candidates.push(candidate);
-		if (candidates.length >= (richDiscovery ? 8 : 3)) break;
+		if (candidates.length >= (richDiscovery ? 10 : 3)) break;
 	}
 	return candidates;
 }
@@ -2471,6 +2475,65 @@ function deterministicMemoryCandidateFromTurn(snippets: string[], hasWrites: boo
 		createdAt: nowTimestamp(),
 		pack: activePack,
 	};
+}
+
+function lastAssistantDiscovery(snippets: string[]): string {
+	for (const snippet of [...snippets].reverse()) {
+		if (snippet.startsWith("Assistant: ")) return snippet.slice("Assistant: ".length).trim();
+	}
+	return "";
+}
+
+function extractMemoryPaths(text: string, limit = 30): string[] {
+	const matches = text.match(/[A-Za-z0-9_.-]+\/(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+/g) ?? [];
+	return [...new Set(matches.map((item) => item.replace(/[),.;:]+$/g, "")))].slice(0, limit);
+}
+
+function inferDiscoverySubject(finalAnswer: string, snippets: string[]): string {
+	const combined = `${finalAnswer}\n${snippets.slice(-8).join("\n")}`;
+	const explicit = combined.match(/(?:repo|repository|reposit[oó]rio)\s+[`"']?([A-Za-z0-9_.-]{3,})[`"']?/i)?.[1];
+	if (explicit) return explicit;
+	for (const p of extractMemoryPaths(combined, 12)) {
+		const first = p.split("/")[0];
+		if (first && !/^(src|app|lib|docs|test|tests|deployments|overlays|bases|prd|pci)$/i.test(first)) return first;
+	}
+	const title = finalAnswer.match(/^#\s+(.+)$/m)?.[1] ?? finalAnswer.match(/^([^\n]{12,90})$/m)?.[1];
+	return slugify(title ?? activePack ?? "rich-discovery") || "rich-discovery";
+}
+
+function richDiscoveryMemoryCandidates(snippets: string[], richDiscovery: boolean): MemoryCandidate[] {
+	if (!richDiscovery) return [];
+	const finalAnswer = lastAssistantDiscovery(snippets);
+	const paths = extractMemoryPaths(snippets.join("\n"), 40);
+	const structuralSignals = (finalAnswer.match(/^##\s+/gm)?.length ?? 0) + paths.length;
+	if (finalAnswer.length < 2200 || structuralSignals < 4) return [];
+	const subject = truncate(inferDiscoverySubject(finalAnswer, snippets), 80).replace(/\s+/g, " ").trim() || "rich discovery";
+	const subjectSlug = slugify(subject);
+	const timestamp = nowTimestamp();
+	const pathList = paths.length ? `\n\n## Source paths observed\n\n${paths.map((p) => `- \`${p}\``).join("\n")}` : "";
+	const snapshot = [`Sanitized rich discovery snapshot captured automatically from the completed turn.`, pathList, "\n## Final answer snapshot\n", truncate(finalAnswer, 12000)].join("\n");
+	if (sensitivePatternHit(subject, snapshot)) return [];
+	const mk = (type: NoteType, title: string, content: string, confidence: number, reason: string, tags: string[] = []): MemoryCandidate => ({
+		id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+		type,
+		title: truncate(title, 120),
+		content,
+		tags: ["autolearn", "rich-discovery", ...tags].slice(0, 8),
+		confidence,
+		reason,
+		createdAt: timestamp,
+		pack: activePack,
+	});
+	const candidates: MemoryCandidate[] = [
+		mk("session", `Rich discovery: ${subject} ${timestamp}`, snapshot, 0.86, "Preserve full sanitized discovery detail from a rich investigation turn", subjectSlug ? [`repo/${subjectSlug}`] : []),
+		mk("context", subject, `## Rich discovery update (${timestamp})\n\n${truncate(finalAnswer, 9000)}${pathList}`, 0.84, "Update component/repository context with detailed discovered structure and configuration", subjectSlug ? [`repo/${subjectSlug}`] : []),
+	];
+	const operational = /\b(deploy|deployment|rollback|tag|image|sync|pipeline|release|kustomi[sz]e|helm|values\.ya?ml|newTag)\b/i.test(finalAnswer);
+	if (operational) {
+		candidates.push(mk("runbook", `${subject} deployment operations`, `## Deployment/runbook details discovered (${timestamp})\n\n${truncate(finalAnswer, 7000)}${pathList}`, 0.83, "Extracted repeatable deploy/configuration procedure from rich discovery", ["deployment-runbook"]));
+	}
+	candidates.push(mk("observation", `${subject} repository structure and configuration patterns`, `## Structural/configuration observations (${timestamp})\n\n${truncate(finalAnswer, 6500)}${pathList}`, 0.82, "Captured factual repo structure/configuration patterns from rich discovery", subjectSlug ? [`repo/${subjectSlug}`] : []));
+	return candidates;
 }
 
 // ---------------------------------------------------------------------------
@@ -4446,15 +4509,16 @@ export default function (pi: ExtensionAPI) {
 			"- action: something that was done (deploy, migration, config change)",
 			"- runbook: a repeatable procedure (deploy steps, troubleshooting)",
 			"- context: project context, stack info, team conventions",
+			"- session: sanitized rich discovery snapshot for later retrieval",
 			"",
-			"DO save: conventions, patterns, safe commands, architecture decisions, deploy procedures, environment details.",
+			"DO save: conventions, patterns, safe commands, architecture decisions, deploy procedures, environment details, sanitized rich discovery summaries.",
 			"DO NOT save: secrets, tokens, passwords, API keys, sensitive customer data, transient info.",
 			"",
 			"The note is saved as Markdown with pack-compliant frontmatter and Obsidian wikilinks.",
 		].join("\n"),
 		parameters: Type.Object({
-			type: StringEnum(["observation", "decision", "action", "runbook", "context"] as const, {
-				description: "Note type. observation=discovered fact, decision=choice with rationale, action=completed task, runbook=procedure, context=project info.",
+			type: StringEnum(["observation", "decision", "action", "runbook", "context", "session"] as const, {
+				description: "Note type. observation=discovered fact, decision=choice with rationale, action=completed task, runbook=procedure, context=project info, session=sanitized rich discovery snapshot.",
 			}),
 			title: Type.String({ description: "Short descriptive title (e.g., 'Deploy uses tag-driven workflow', 'PostgreSQL RLS for multi-tenancy')" }),
 			content: Type.String({ description: "Markdown content of the note. Include context, rationale, commands, links." }),
@@ -4539,13 +4603,24 @@ export default function (pi: ExtensionAPI) {
 		if (snippets.length === 0) return;
 
 		let candidates = await curateMemoryCandidatesFromTurn(ctx, snippets, richDiscovery);
+		const structuralCandidates = richDiscoveryMemoryCandidates(snippets, richDiscovery);
+		if (structuralCandidates.length > 0) {
+			const seen = new Set(candidates.map((candidate) => `${candidate.type}:${slugify(candidate.title)}`));
+			for (const candidate of structuralCandidates) {
+				const key = `${candidate.type}:${slugify(candidate.title)}`;
+				if (!seen.has(key)) {
+					candidates.push(candidate);
+					seen.add(key);
+				}
+			}
+		}
 		if (candidates.length === 0) {
 			const fallback = deterministicMemoryCandidateFromTurn(snippets, hasWrites);
 			if (fallback) candidates = [fallback];
 		}
 		if (candidates.length === 0) return;
 
-		const maxProcess = richDiscovery ? 8 : 3;
+		const maxProcess = richDiscovery ? 12 : 3;
 		let savedCount = 0;
 		let queuedCount = 0;
 		for (const candidate of candidates.slice(0, maxProcess)) {

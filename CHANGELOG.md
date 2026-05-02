@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.9.4] - 2026-05-02
+
+### Changed
+
+- Preserve rich discovery turns more completely by adding automatic sanitized session snapshots under `80-sessions` when a final answer contains dense durable repository/configuration detail.
+- Add structural fallback memories for rich discovery turns so detailed final answers also update context, observation, and runbook notes even when the LLM curator returns only terse candidates.
+- Allow `session` memory notes for sanitized rich discovery snapshots.
+- Increase rich-discovery post-turn processing capacity from 8 to 12 candidates.
+
+
 ## [0.9.3] - 2026-05-02
 
 ### Fixed
