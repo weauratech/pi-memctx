@@ -53,9 +53,9 @@ See `examples/basic-pack/` for a minimal public-safe pack.
 
 Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
 
-pi-memctx starts with `profile:auto` and persists config in `~/.config/pi-memctx/config.json`. Use `/memctx-profile low|balanced|auto|full` to switch behavior profiles, or `/memctx-config reset` to return to defaults.
+pi-memctx starts with `profile:gateway` and persists config in `~/.config/pi-memctx/config.json`. Use `/memctx-profile gateway` to re-apply the default Memory Gateway profile, or `/memctx-config reset` to return to defaults.
 
-Strict mode is on by default for stronger retrieval guidance before project-specific answers. You can toggle it when needed:
+Strict mode is off by default because the gateway first injects compact memory and only asks the agent to inspect source files when memory is insufficient, stale, or conflicting. You can toggle it when needed:
 
 ```txt
 /memctx-strict on
@@ -66,7 +66,7 @@ Advanced commands can override the active profile and mark it `custom`:
 
 ```txt
 /memctx-auto-switch all
-/memctx-llm first
+/memctx-llm assist
 ```
 
 Environment equivalents:

@@ -12,7 +12,7 @@
   <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fweauratech%2Fpi-memctx&query=%24.stargazers_count&label=stars&color=yellow&style=flat&logo=github" alt="Stars"></a>
   <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
-  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.7.2-blue?style=flat" alt="Latest Release"></a>
+  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.8.0-blue?style=flat" alt="Latest Release"></a>
 </p>
 
 <p align="center">
@@ -110,7 +110,7 @@ Latest local benchmark from the synthetic NovaPay fixture, 5 tasks, 1 repeat:
 ```bash
 QMD_PATH=/tmp/pi-memctx-qmd/node_modules/.bin/qmd \
 BENCH_REPEATS=1 \
-BENCH_PROFILES="baseline gateway-lite gateway-full" \
+BENCH_PROFILES="baseline gateway" \
 BENCH_TIMEOUT=120 \
 bash benchmark/run.sh /tmp/pi-memctx-benchmark-gateway-final
 ```
@@ -118,22 +118,20 @@ bash benchmark/run.sh /tmp/pi-memctx-benchmark-gateway-final
 | Profile | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task | Failed tools/task | Quality |
 |---|---:|---:|---:|---:|---:|---:|
 | baseline | 24.2s | 2,315 | 594 | 5.4 | 0.2 | 12/22 |
-| gateway-lite | 5.18s | 2,016 | 238 | 0.0 | 0.0 | 21/22 |
-| gateway-full | 5.36s | 2,019 | 234 | 0.0 | 0.0 | 21/22 |
+| gateway | 5.18s | 2,016 | 238 | 0.0 | 0.0 | 21/22 |
 
 Compared with baseline:
 
 | Profile | Latency | Provider tokens | Visible tokens | Tool calls | Quality |
 |---|---:|---:|---:|---:|---:|
-| gateway-lite | **78.6% faster** | **12.9% fewer** | **59.9% fewer** | **100% fewer** | **+9 facts** |
-| gateway-full | **77.9% faster** | **12.8% fewer** | **60.6% fewer** | **100% fewer** | **+9 facts** |
+| gateway | **78.6% faster** | **12.9% fewer** | **59.9% fewer** | **100% fewer** | **+9 facts** |
 
 Benchmarks are intentionally local and reproducible. Run them on your own projects:
 
 ```bash
 bash benchmark/setup.sh /tmp/pi-memctx-benchmark
 QMD_PATH=$(pwd)/node_modules/.bin/qmd \
-BENCH_PROFILES="baseline gateway-lite gateway-full" \
+BENCH_PROFILES="baseline gateway" \
 bash benchmark/run.sh /tmp/pi-memctx-benchmark
 ```
 
@@ -161,24 +159,22 @@ Pi agent answers normally
 
 The gateway does **not** replace the main LLM. It does the boring part first: finding the right project memory, compressing it, and preventing redundant tool exploration when the answer is already known.
 
-## Profiles
+## Profile
+
+`pi-memctx` now has one recommended runtime profile: `gateway`.
 
 | Profile | Best for | Behavior |
 |---|---|---|
-| `gateway-lite` | Speed and low overhead | Conservative local judge, compact context, autosave off. |
-| `gateway` | Default daily use | Balanced retrieval, autosave enabled, LLM assistance only when useful. |
-| `gateway-full` | Higher-confidence answers | More context capacity, but now uses the same fast gateway architecture instead of expensive always-on judging. |
+| `gateway` | Fast daily use | Conservative local judge, compact context, qmd/grep retrieval, zero redundant memory searches when memory is sufficient. |
 
-Switch profiles inside Pi:
+Inspect or re-apply the profile inside Pi:
 
 ```txt
-/memctx-profile gateway-lite
-/memctx-profile gateway
-/memctx-profile gateway-full
 /memctx-profile status
+/memctx-profile gateway
 ```
 
-The old profile names are compatibility-mapped into the new gateway runtime.
+Old profile names such as `gateway-lite`, `gateway-full`, `qmd-economy`, `low`, `balanced`, `auto`, and `full` are compatibility-mapped to `gateway`.
 
 ## Memory packs
 
@@ -223,7 +219,7 @@ Recommended note types:
 | `/memctx-pack-generate` | Create a memory pack from the current workspace. |
 | `/memctx-pack` | Select or show the active pack. |
 | `/memctx-pack-status` | Show active pack and retrieval status. |
-| `/memctx-profile` | Switch between `gateway-lite`, `gateway`, and `gateway-full`. |
+| `/memctx-profile` | Show or apply the `gateway` profile. |
 | `/memctx-config` | Show current config. |
 | `/memctx-retrieval` | Configure retrieval policy. |
 | `/memctx-autosave` | Configure autosave behavior. |
@@ -354,7 +350,7 @@ Run benchmark:
 bash benchmark/setup.sh /tmp/pi-memctx-benchmark
 QMD_PATH=/tmp/pi-memctx-qmd/node_modules/.bin/qmd \
 BENCH_REPEATS=1 \
-BENCH_PROFILES="baseline gateway-lite gateway-full" \
+BENCH_PROFILES="baseline gateway" \
 BENCH_TIMEOUT=120 \
 bash benchmark/run.sh /tmp/pi-memctx-benchmark
 ```

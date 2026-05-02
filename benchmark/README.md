@@ -2,7 +2,7 @@
 
 Measure the local impact of pi-memctx inside your own Pi CLI.
 
-The benchmark compares the same tasks with **no extensions** (`baseline`) and with pi-memctx loaded using the `qmd-economy` profile. It does not add extension slash commands; it runs Pi in print mode with isolated environment variables.
+The benchmark compares the same tasks with **no extensions** (`baseline`) and with pi-memctx loaded using the single recommended `gateway` profile. It runs Pi in print mode with isolated environment variables.
 
 ## Quick start
 
@@ -10,14 +10,14 @@ The benchmark compares the same tasks with **no extensions** (`baseline`) and wi
 # 1. Setup fake project + pack
 bash benchmark/setup.sh
 
-# 2. Run local comparison: baseline vs qmd-economy
+# 2. Run local comparison: baseline vs gateway
 bash benchmark/run.sh
 ```
 
 Optional:
 
 ```bash
-BENCH_REPEATS=2 BENCH_PROFILES="baseline qmd-economy" bash benchmark/run.sh
+BENCH_REPEATS=2 BENCH_PROFILES="baseline gateway" bash benchmark/run.sh
 BENCH_PI_MODEL="github-copilot/gpt-5.5" bash benchmark/run.sh
 ```
 
@@ -27,10 +27,11 @@ Each task runs for each selected profile.
 
 | Metric | What it shows |
 |---|---|
-| **Duration** | End-to-end print-mode task duration |
-| **Observed tool calls** | Best-effort count from the raw Pi output |
-| **Quality score** | How many expected key facts the response contains |
-| **Approx visible tokens** | Approximation from prompt+output chars / 4 |
+| **Duration** | End-to-end print-mode task duration. |
+| **Provider tokens** | Token usage reported by Pi JSON usage events when available. |
+| **Observed tool calls** | Best-effort tool-call count from Pi JSON events. |
+| **Quality score** | How many expected key facts the response contains. |
+| **Approx visible tokens** | Approximation from prompt + output chars / 4. |
 
 ## Tasks
 
@@ -44,18 +45,19 @@ Each task runs for each selected profile.
 
 ## Expected results
 
-With `qmd-economy`:
-- **Zero or near-zero unnecessary tool calls** — compact memory answers supported questions while still allowing search/source inspection when memory is incomplete
-- **Higher quality** — knows architecture decisions, conventions, runbooks
-- **Faster responses** — compact context produces direct answers instead of exploration
-- **Lower visible token usage** — concise fact cards/search results reduce assistant output and follow-up prompts
+With `gateway`:
+
+- **Zero or near-zero unnecessary tool calls** — memory answers supported questions while still allowing source inspection when memory is incomplete.
+- **Higher quality** — knows architecture decisions, conventions, and runbooks.
+- **Faster responses** — compact gateway context avoids repeated repo exploration.
+- **Lower visible token usage** — concise local summaries reduce assistant output and follow-up prompts.
 
 ## Output
 
 Results saved to `/tmp/pi-memctx-benchmark/results/`:
 
 - `*_baseline_r*.txt` — raw agent output without extensions
-- `*_qmd-economy_r*.txt` — raw agent output with pi-memctx profile `qmd-economy`
+- `*_gateway_r*.txt` — raw agent output with pi-memctx profile `gateway`
 - `*_metrics.json` — structured metrics per task/profile/repeat
 - `summary-<run-id>.jsonl` — machine-readable aggregate rows
 - `report-<run-id>.md` — human-readable report
