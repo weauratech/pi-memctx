@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.1] - 2026-05-02
+
+### Fixed
+
+- Run `/memctx-pack-enrich` as a guarded background job so the Pi terminal remains responsive while enrichment and qmd indexing continue.
+
+
 ## [0.8.0] - 2026-05-02
 
 ### Changed
