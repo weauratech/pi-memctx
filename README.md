@@ -269,15 +269,20 @@ Secret-looking content is blocked.
 
 ## qmd integration
 
-`pi-memctx` uses [`@tobilu/qmd`](https://www.npmjs.com/package/@tobilu/qmd) when available for fast memory retrieval. If qmd is not available, it falls back to grep-based search.
+`pi-memctx` uses [`@tobilu/qmd`](https://www.npmjs.com/package/@tobilu/qmd) when available for fast memory retrieval. To keep `pi install npm:pi-memctx` clean and warning-free, qmd is not installed automatically. If qmd is not available, pi-memctx falls back to grep-based search.
 
 Resolution order:
 
 1. `QMD_PATH` or `MEMCTX_QMD_BIN`
-2. optional dependency `@tobilu/qmd`
-3. local `.bin` or bundled/vendor path
-4. `PATH`
-5. grep fallback
+2. an already-installed local `.bin` or bundled/vendor path
+3. `qmd` on `PATH`
+4. grep fallback
+
+Optional qmd install example:
+
+```bash
+npm install -g @tobilu/qmd
+```
 
 Check your setup:
 

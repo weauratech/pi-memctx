@@ -76,7 +76,7 @@ function doctor() {
     qmd.error ? `qmd error: ${qmd.error}` : "",
     `retrieval backend: ${qmd.available ? "qmd" : "grep fallback"}`,
     "",
-    qmd.available ? "status: ok" : "suggestion: install optional dependency @tobilu/qmd for your platform, or set QMD_PATH=/path/to/qmd.",
+    qmd.available ? "status: ok" : "suggestion: install qmd separately (npm install -g @tobilu/qmd) or set QMD_PATH=/path/to/qmd. grep fallback works without qmd.",
   ].filter(Boolean).join("\n"));
 
   process.exit(qmd.available ? 0 : 1);
