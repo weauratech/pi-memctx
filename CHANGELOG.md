@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.9.5] - 2026-05-02
+
+### Fixed
+
+- Tolerate non-string fact items returned by the memory gateway judge instead of crashing with `fact.replace is not a function`.
+- Remove private fixture names from generic unit-test coverage and note-targeting stop words.
+
+
 ## [0.9.4] - 2026-05-02
 
 ### Changed
