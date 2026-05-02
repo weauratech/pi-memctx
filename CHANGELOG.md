@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.9.3] - 2026-05-02
+
+### Fixed
+
+- Add precision judging for repo/component/deploy detail prompts so useful but generic memory is treated as partial and the agent verifies source-of-truth files before answering assertively.
+- Feed sanitized tool-result snippets into automatic post-turn learning so rich discovery sessions preserve concrete architecture/config/deploy details instead of only terse summaries.
+- Route context memory updates to exact repo/component context notes and avoid appending discovered details to unrelated similar notes.
+- Redact and block localized secret labels such as `senha`/`credencial` in addition to English secret labels.
+
+
 ## [0.9.2] - 2026-05-02
 
 ### Fixed

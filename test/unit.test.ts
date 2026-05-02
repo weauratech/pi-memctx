@@ -1410,6 +1410,48 @@ describe("memctx_save tool", () => {
 		expect(result.isError).toBe(true);
 	});
 
+	test("blocks localized secret labels", async () => {
+		const { packPath } = createTestVault();
+		const { pi, tools } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+
+		const result = await tools["memctx_save"].execute(
+			"c1",
+			{ type: "observation", title: "Database config", content: "BANCO_SENHA: super_secret_123" },
+			null, () => {}, {},
+		);
+
+		expect(result.content[0].text).toContain("Blocked");
+		expect(result.isError).toBe(true);
+	});
+
+	test("context updates target exact repo context instead of unrelated similar notes", async () => {
+		const { packPath } = createTestVault();
+		const { pi, tools } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+
+		fs.writeFileSync(path.join(packPath, "20-context", "argo-cd.md"), buildNote("test-pack", "context", "argo-cd", "# argo-cd\n", ["repo/argo-cd"]));
+		fs.writeFileSync(path.join(packPath, "20-context", "poc-grafana-stack.md"), buildNote("test-pack", "context", "poc-grafana-stack", "# poc-grafana-stack\n", ["repo/poc-grafana-stack"]));
+
+		const result = await tools["memctx_save"].execute(
+			"c1",
+			{
+				type: "context",
+				title: "cards-api-payment deployment in argo-cd",
+				content: "Discovered from `argo-cd/PRD_Argo_Configs/deployments/prd/cards-api-payment/cards-api-payment-v1/values.yaml`.",
+				tags: ["repo/argo-cd", "cards-api-payment"],
+			},
+			null, () => {}, {},
+		);
+
+		expect(result.details.action).toBe("updated");
+		expect(result.details.path).toContain("20-context/argo-cd.md");
+		expect(fs.readFileSync(path.join(packPath, "20-context", "argo-cd.md"), "utf-8")).toContain("cards-api-payment");
+		expect(fs.readFileSync(path.join(packPath, "20-context", "poc-grafana-stack.md"), "utf-8")).not.toContain("cards-api-payment");
+	});
+
 	test("blocks AWS keys", async () => {
 		const { packPath } = createTestVault();
 		const { pi, tools } = createMockPi();
