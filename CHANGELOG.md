@@ -7,6 +7,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.9.0] - 2026-05-02
+
+### Added
+
+- Added an automatic post-turn memory curator that evaluates completed prompts for durable project knowledge, repo discoveries, business rules, conventions, runbooks, and explicit user/team preferences.
+- The gateway profile now enables conservative `learn auto` by default, saving high-confidence memory and queueing lower-confidence candidates.
+
+### Changed
+
+- Memory learning no longer depends on the main agent remembering to call `memctx_save`; pi-memctx evaluates the completed turn after the agent responds.
+
+
 ## [0.8.5] - 2026-05-02
 
 ### Fixed

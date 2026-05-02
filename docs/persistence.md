@@ -1,6 +1,6 @@
 # Persistence
 
-`memctx_save` writes durable notes to the active pack. pi-memctx can also queue autosave candidates after meaningful turns when `/memctx-autosave` is enabled.
+`memctx_save` writes durable notes to the active pack. The gateway profile also runs a conservative post-turn memory curator by default: after each meaningful turn, pi-memctx looks for durable project knowledge, conventions, runbooks, architecture, business rules, completed actions, or explicit user/team preferences worth saving.
 
 ## Supported types
 
@@ -17,7 +17,7 @@
 - Action notes include the current date in the filename.
 - Index files are updated when a matching index exists.
 - Common secret patterns are blocked before writing.
-- Autosave candidates are stored in a local review queue before being approved, unless `auto` mode is enabled and confidence is high.
+- High-confidence curator candidates are saved automatically in `auto` mode; lower-confidence candidates are queued locally for review.
 
 ## Autosave and review
 
@@ -26,7 +26,7 @@
 /memctx-save-queue list|approve <id>|reject <id>|clear
 ```
 
-`autosave=suggest` queues candidates and shows a widget. `autosave=confirm` asks immediately. `autosave=auto` writes directly when confidence is high and discards low-confidence candidates by default, so it does not require queue approval. Set `MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=true` to queue low-confidence auto candidates for review.
+`autosave=suggest` queues candidates and shows a widget. `autosave=confirm` asks immediately. `autosave=auto` writes directly when confidence is high and queues lower-confidence candidates when `MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=true` (the gateway default).
 
 ## Limitations
 
