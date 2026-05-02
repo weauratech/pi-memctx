@@ -22,7 +22,7 @@
 
 `auto` uses `MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS` with a default of `1000`, so strict mode no longer turns `auto` into full strict retrieval. Use `/memctx-retrieval strict` when depth matters more than latency.
 
-qmd is resolved from `QMD_PATH`/`MEMCTX_QMD_BIN`, the optional bundled `@tobilu/qmd` dependency, local/vendor binaries, or `PATH`. Without qmd, pi-memctx falls back to local grep-style Markdown search.
+qmd is resolved from `QMD_PATH`/`MEMCTX_QMD_BIN`, already-installed local/vendor binaries, or `PATH`. Without qmd, pi-memctx falls back to local grep-style Markdown search. qmd is no longer installed automatically with pi-memctx so `pi install npm:pi-memctx` stays small and warning-free.
 
 ## Examples
 
@@ -37,9 +37,8 @@ memctx_search(query="incident runbook for queue lag", mode="deep", limit=3)
 pi-memctx attempts to use qmd automatically:
 
 1. `QMD_PATH` or `MEMCTX_QMD_BIN`
-2. `@tobilu/qmd` optional dependency installed with the package
-3. local `node_modules/.bin/qmd` or `vendor/qmd/<platform>-<arch>/qmd`
-4. `qmd` on `PATH`
-5. grep fallback
+2. local `node_modules/.bin/qmd` or `vendor/qmd/<platform>-<arch>/qmd`
+3. `qmd` on `PATH`
+4. grep fallback
 
 Use `/memctx-pack-status`, `/memctx-doctor`, or `npx pi-memctx doctor` to see which path is active. `/pack-status` remains available as a deprecated compatibility alias.

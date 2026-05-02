@@ -23,7 +23,6 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { cheapSemanticJudge, contextualAnchors, rankCandidates, selectCoverageCandidates } from "./src/gateway/cheap-semantic.js";
@@ -219,6 +218,28 @@ let llmStats: LlmStats = {
 };
 
 const nodeRequire = createRequire(import.meta.url);
+type PiAiComplete = (model: unknown, request: unknown, options: unknown) => Promise<{ content: Array<{ type: string; text?: string }> }>;
+let piAiComplete: PiAiComplete | null = null;
+
+async function loadPiAiComplete(): Promise<PiAiComplete | null> {
+	if (piAiComplete) return piAiComplete;
+	try {
+		const mod = await import("@mariozechner/pi-ai");
+		piAiComplete = (mod as { complete?: PiAiComplete }).complete ?? null;
+		if (piAiComplete) return piAiComplete;
+	} catch {
+		// pi-ai is intentionally not a runtime dependency of pi-memctx to keep installs clean.
+	}
+	try {
+		const piPkg = nodeRequire.resolve("@mariozechner/pi-coding-agent/package.json");
+		const hostRequire = createRequire(piPkg);
+		const mod = hostRequire("@mariozechner/pi-ai") as { complete?: PiAiComplete };
+		piAiComplete = mod.complete ?? null;
+		return piAiComplete;
+	} catch {
+		return null;
+	}
+}
 
 function parseStrictModeEnv(value: string | undefined): boolean {
 	const normalized = (value ?? "on").toLowerCase();
@@ -776,11 +797,16 @@ async function completeJsonWithModel<T>(
 			llmStats.lastError = auth.ok ? `No API key for ${ctx.model.provider}` : auth.error;
 			return null;
 		}
+		const complete = await loadPiAiComplete();
+		if (!complete) {
+			llmStats.lastError = "@mariozechner/pi-ai is unavailable from pi-memctx and host Pi installation";
+			return null;
+		}
 		const text = JSON.stringify(payload);
 		llmStats.callsThisSession++;
 		llmStats.lastUseCase = useCase;
 		llmStats.estimatedInputChars += systemPrompt.length + text.length;
-		const userMessage: UserMessage = {
+		const userMessage = {
 			role: "user",
 			content: [{ type: "text", text }],
 			timestamp: Date.now(),
