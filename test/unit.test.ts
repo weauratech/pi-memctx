@@ -26,6 +26,7 @@ import {
 	findVaultRoot,
 	generatePackFromDirectory,
 	grepSearchPack,
+	normalizeNoteTitle,
 	listPacks,
 	nowTimestamp,
 	readFileSafe,
@@ -1273,6 +1274,15 @@ describe("buildNote", () => {
 		expect(note).toContain("  - go");
 		expect(note).toContain("  - architecture");
 	});
+
+	test("normalizes redundant type prefixes in headings and ids", () => {
+		expect(normalizeNoteTitle("runbook", "Runbook: sync central instructions")).toBe("sync central instructions");
+		const note = buildNote("p", "runbook", "Runbook: sync central instructions", "Body");
+		expect(note).toContain("id: runbook.p.sync-central-instructions");
+		expect(note).toContain("title: sync central instructions");
+		expect(note).toContain("# sync central instructions");
+		expect(note).not.toContain("# Runbook:");
+	});
 });
 
 describe("resolveNoteDir", () => {
@@ -1360,6 +1370,25 @@ describe("memctx_save tool", () => {
 		const actionFile = files.find((f) => f.includes("setup-ci"));
 		expect(actionFile).toBeDefined();
 		expect(actionFile).toMatch(/^\d{4}-\d{2}-\d{2}-/);
+	});
+
+	test("memctx_save normalizes redundant note type prefixes", async () => {
+		const { packPath } = createTestVault();
+		const { pi, tools } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+
+		const result = await tools["memctx_save"].execute(
+			"c1",
+			{ type: "runbook", title: "Runbook: sync central instructions", content: "Step 1. Generate instructions. Step 2. Open PR." },
+			null, () => {}, {},
+		);
+
+		expect(result.details.path).toBe("70-runbooks/sync-central-instructions.md");
+		const content = fs.readFileSync(path.join(packPath, result.details.path), "utf-8");
+		expect(content).toContain("title: sync central instructions");
+		expect(content).toContain("# sync central instructions");
+		expect(content).not.toContain("Runbook: sync central instructions");
 	});
 
 	test("appends to existing note", async () => {
