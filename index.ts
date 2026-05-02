@@ -1182,7 +1182,13 @@ function summarizeGatewayFacts(decision: GatewayJudgeDecision, candidates: Gatew
 		candidateFacts.push(...localFacts.sort((a, b) => a.rank - b.rank).map((fact) => fact.text).slice(0, perCandidateLimit));
 	}
 	const modelFacts = (decision.facts ?? [])
-		.map((fact) => normalizeContextLine(fact.replace(/^[-*#\s]+/, "")))
+		.map((fact) => {
+			const text = typeof fact === "string"
+				? fact
+				: fact == null ? ""
+					: JSON.stringify(fact);
+			return normalizeContextLine(text.replace(/^[-*#\s]+/, ""));
+		})
 		.filter((fact) => fact.length >= 12 && !/^Query:/i.test(fact));
 	return [...new Set([...modelFacts, ...candidateFacts])].slice(0, broadProject ? 22 : 16);
 }
@@ -2303,7 +2309,7 @@ function findSimilarNote(candidate: MemoryCandidate): string | null {
 	if (candidate.type === "session") return null;
 	const exactContext = exactContextTargetNote(candidate);
 	if (exactContext) return exactContext;
-	const stop = new Set(["repo", "repository", "service", "component", "application", "deploy", "deployment", "config", "context", "overview", "korporate"]);
+	const stop = new Set(["repo", "repository", "service", "component", "application", "deploy", "deployment", "config", "context", "overview"]);
 	const terms = candidate.title.toLowerCase().split(/\s+/).filter((term) => term.length > 3 && !stop.has(term)).slice(0, 8);
 	if (terms.length === 0) return null;
 	const dirs = NOTE_TYPE_DIRS[candidate.type].map((dir) => path.join(activePackPath, dir)).filter((dir) => fs.existsSync(dir));
