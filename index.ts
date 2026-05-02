@@ -2345,6 +2345,38 @@ function findSimilarNote(candidate: MemoryCandidate): string | null {
 	return null;
 }
 
+function memoryWikilink(rel: string, title: string): string {
+	const noExt = rel.replace(/\.md$/, "");
+	return `[[packs/${activePack}/${noExt}|${normalizeContextLine(title)}]]`;
+}
+
+function uniqueSavedMemoryItems<T extends { rel: string }>(items: T[]): T[] {
+	const seen = new Set<string>();
+	return items.filter((item) => {
+		if (seen.has(item.rel)) return false;
+		seen.add(item.rel);
+		return true;
+	});
+}
+
+function appendSameTurnLearnedLinks(items: Array<{ rel: string; title: string; type: NoteType }>): void {
+	if (!activePackPath || !activePack || items.length <= 1) return;
+	items = uniqueSavedMemoryItems(items);
+	if (items.length <= 1) return;
+	const timestamp = nowTimestamp();
+	const links = items
+		.map((item) => `- ${item.type}: ${memoryWikilink(item.rel, item.title)}`)
+		.join("\n");
+	for (const item of items) {
+		const filePath = path.join(activePackPath, item.rel);
+		const existing = readFileSafe(filePath);
+		if (!existing) continue;
+		const marker = `same-turn-${timestamp}`;
+		if (existing.includes(marker)) continue;
+		fs.writeFileSync(filePath, `${existing.trimEnd()}\n\n## Related learned memories <!-- ${marker} -->\n\n${links}\n`, "utf-8");
+	}
+}
+
 function saveMemoryCandidate(candidate: MemoryCandidate): { rel: string; action: "created" | "updated" } {
 	if (!activePackPath || !activePack) throw new Error("No active memory pack");
 	candidate = { ...candidate, title: normalizeNoteTitle(candidate.type, candidate.title), content: sanitizeEvidence(candidate.content) };
@@ -4713,6 +4745,7 @@ export default function (pi: ExtensionAPI) {
 		const maxProcess = (richDiscovery || richSession) ? 12 : 3;
 		let savedCount = 0;
 		let queuedCount = 0;
+		const savedItems: Array<{ rel: string; title: string; type: NoteType; action: "created" | "updated" }> = [];
 		for (const candidate of candidates.slice(0, maxProcess)) {
 			if (sensitivePatternHit(candidate.title, candidate.content)) continue;
 			if (autosaveMode === "auto") {
@@ -4720,7 +4753,7 @@ export default function (pi: ExtensionAPI) {
 					try {
 						const saved = saveMemoryCandidate(candidate);
 						savedCount++;
-						if (ctx.hasUI) ctx.ui.notify(`memctx: learned ${candidate.type}: ${saved.rel}`, "info");
+						savedItems.push({ rel: saved.rel, title: candidate.title, type: candidate.type, action: saved.action });
 					} catch {
 						enqueueMemoryCandidate(candidate);
 						queuedCount++;
@@ -4738,7 +4771,7 @@ export default function (pi: ExtensionAPI) {
 					try {
 						const saved = saveMemoryCandidate(candidate);
 						savedCount++;
-						ctx.ui.notify(`memctx: Saved ${candidate.type}: ${saved.rel}`, "info");
+						savedItems.push({ rel: saved.rel, title: candidate.title, type: candidate.type, action: saved.action });
 						continue;
 					} catch (err) {
 						ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -4750,7 +4783,18 @@ export default function (pi: ExtensionAPI) {
 			queuedCount++;
 		}
 
+		appendSameTurnLearnedLinks(savedItems);
 		if ((savedCount > 0 || queuedCount > 0) && qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+		if (savedItems.length > 0 && ctx.hasUI) {
+			const visibleSavedItems = uniqueSavedMemoryItems(savedItems);
+			const lines = visibleSavedItems.map((item) => `   - ${item.type}: ${memoryWikilink(item.rel, item.title)} (${item.action})`);
+			ctx.ui.notify([`memctx: learned ${visibleSavedItems.length} memor${visibleSavedItems.length === 1 ? "y" : "ies"}:`, ...lines].join("\n"), "info");
+			ctx.ui.setWidget("memctx-learned", [
+				`\x1b[32m🧠 memctx learned ${visibleSavedItems.length} memor${visibleSavedItems.length === 1 ? "y" : "ies"}\x1b[0m`,
+				...lines,
+			]);
+			setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-learned", []), 30000);
+		}
 		if (queuedCount > 0 && ctx.hasUI) {
 			ctx.ui.setWidget("memctx-learn", [
 				`\x1b[33m💡 memctx: ${queuedCount} memory candidate${queuedCount === 1 ? "" : "s"} queued for review.\x1b[0m`,

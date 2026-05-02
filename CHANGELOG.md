@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.10.1] - 2026-05-02
+
+### Changed
+
+- Show all memories learned from a turn in one post-turn notification/widget instead of only surfacing individual saves.
+- Add same-turn wikilinks between memories learned together so related context, observation, runbook, action, decision, and session notes are easier to navigate and index.
+
+
 ## [0.10.0] - 2026-05-02
 
 ### Changed
