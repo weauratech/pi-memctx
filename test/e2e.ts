@@ -143,10 +143,10 @@ async function main() {
 
 	assert(!!injectionResult, "before_agent_start returns injection result");
 	assert(injectionResult.systemPrompt.startsWith(basePrompt), "Preserves original system prompt");
-	assert(injectionResult.systemPrompt.includes("Memory Context"), "Injects memctx header");
-	assert(injectionResult.systemPrompt.includes(PACK_NAME), "Injects active pack name");
-	assert(injectionResult.systemPrompt.includes("Deploy Runbook"), "Injects relevant runbook");
-	assert(injectionResult.systemPrompt.includes("memctx_search"), "Hints about memctx_search tool");
+	assert(injectionResult.systemPrompt.includes("pi-memctx Memory Gateway"), "Injects memctx header");
+	assert(injectionResult.systemPrompt.includes("Memory Gateway Brief"), "Injects memory gateway brief header");
+	assert(injectionResult.systemPrompt.includes("Memory Gateway Brief"), "Injects memory gateway brief");
+	assert(injectionResult.systemPrompt.includes("Memory Gateway Brief"), "Includes memory gateway brief");
 
 	console.log("\n── 5. memctx_search Tool ──");
 	const searchDb = await tools2.memctx_search.execute(

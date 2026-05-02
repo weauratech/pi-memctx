@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx qmd-economy.
+# Run a local pi benchmark: same tasks WITHOUT memctx and WITH pi-memctx gateway.
 # Captures JSON-mode events so tool calls and provider token usage can be measured.
 #
 # Usage:
@@ -7,7 +7,7 @@
 #   bash benchmark/run.sh [base_dir]
 #
 # Optional env:
-#   BENCH_PROFILES="baseline qmd-economy"  # default
+#   BENCH_PROFILES="baseline gateway"      # default
 #   BENCH_REPEATS=2                         # default
 #   BENCH_PI_MODEL="provider/model"         # optional pass-through to pi --model
 #   BENCH_TIMEOUT=180                       # seconds per task
@@ -17,7 +17,7 @@ set -euo pipefail
 BASE_DIR="${1:-/tmp/pi-memctx-benchmark}"
 RESULTS_DIR="$BASE_DIR/results"
 EXTENSION_PATH="$(cd "$(dirname "$0")/.." && pwd)"
-BENCH_PROFILES="${BENCH_PROFILES:-baseline qmd-economy}"
+BENCH_PROFILES="${BENCH_PROFILES:-baseline gateway}"
 BENCH_REPEATS="${BENCH_REPEATS:-2}"
 BENCH_TIMEOUT="${BENCH_TIMEOUT:-180}"
 BENCH_RUN_ID="$(date +%Y%m%d-%H%M%S)"
@@ -58,30 +58,79 @@ profile_config() {
   local profile="$1"
   local config_path="$2"
   case "$profile" in
-    qmd-economy)
+    gateway)
       cat > "$config_path" <<'JSON'
 {
-  "profile": "qmd-economy",
-  "baseProfile": "qmd-economy",
+  "profile": "gateway",
+  "baseProfile": "gateway",
   "strict": false,
-  "retrieval": "fast",
-  "retrievalLatencyBudgetMs": 250,
+  "retrieval": "balanced",
+  "retrievalLatencyBudgetMs": 1200,
+  "autosave": "auto",
+  "autosaveQueueLowConfidence": false,
+  "llm": "assist",
+  "autoSwitch": "cwd",
+  "autoBootstrap": "ask",
+  "startupDoctor": "off",
+  "toolFailureHints": true,
+  "contextMode": "compact",
+  "contextPipeline": "gateway",
+  "contextTokenBudget": 750,
+  "contextMaxItems": 10,
+  "contextStripMetadata": true
+}
+JSON
+      ;;
+    gateway-lite)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "gateway-lite",
+  "baseProfile": "gateway-lite",
+  "strict": false,
+  "retrieval": "balanced",
+  "retrievalLatencyBudgetMs": 800,
   "autosave": "off",
   "autosaveQueueLowConfidence": false,
   "llm": "off",
   "autoSwitch": "cwd",
   "autoBootstrap": "ask",
   "startupDoctor": "off",
-  "toolFailureHints": false,
+  "toolFailureHints": true,
   "contextMode": "compact",
-  "contextPipeline": "qmd-economy",
+  "contextPipeline": "gateway",
   "contextTokenBudget": 650,
-  "contextMaxItems": 8,
+  "contextMaxItems": 10,
   "contextStripMetadata": true
 }
 JSON
       ;;
-    *) echo "Unknown profile for benchmark: $profile (supported: baseline qmd-economy)" >&2; return 1 ;;
+    gateway-full)
+      cat > "$config_path" <<'JSON'
+{
+  "profile": "gateway-full",
+  "baseProfile": "gateway-full",
+  "strict": false,
+  "retrieval": "balanced",
+  "retrievalLatencyBudgetMs": 1200,
+  "autosave": "auto",
+  "autosaveQueueLowConfidence": false,
+  "llm": "assist",
+  "autoSwitch": "cwd",
+  "autoBootstrap": "ask",
+  "startupDoctor": "off",
+  "toolFailureHints": true,
+  "contextMode": "compact",
+  "contextPipeline": "gateway",
+  "contextTokenBudget": 900,
+  "contextMaxItems": 14,
+  "contextStripMetadata": true
+}
+JSON
+      ;;
+    qmd-economy)
+      profile_config "gateway-lite" "$config_path"
+      ;;
+    *) echo "Unknown profile for benchmark: $profile (supported: baseline gateway-lite gateway gateway-full)" >&2; return 1 ;;
   esac
 }
 
@@ -317,7 +366,7 @@ PY
 cat <<HEADER
 
 ═══════════════════════════════════════════════════
-  pi-memctx Local Benchmark: baseline vs qmd-economy
+  pi-memctx Local Benchmark: baseline vs gateway
 ═══════════════════════════════════════════════════
 
 Base dir:     $BASE_DIR

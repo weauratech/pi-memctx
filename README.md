@@ -16,394 +16,362 @@
 </p>
 
 <p align="center">
-  <a href="#what-it-does">What it does</a> •
-  <a href="#install">Install</a> •
-  <a href="#setup">Setup</a> •
-  <a href="#context-injection-priority">Context</a> •
-  <a href="#tools">Tools</a> •
+  <a href="#quickstart">Quickstart</a> •
+  <a href="#why-it-feels-like-magic">Why</a> •
+  <a href="#benchmark">Benchmark</a> •
+  <a href="#how-it-works">How it works</a> •
+  <a href="#memory-packs">Packs</a> •
   <a href="#commands">Commands</a> •
-  <a href="#documentation">Docs</a> •
   <a href="#development">Development</a>
 </p>
 
 ---
 
-Automatic memory context injection for [Pi coding agent](https://github.com/mariozechner/pi-mono).
+**Stop paying your coding agent to rediscover what your project already knows.**
 
-**Your agent forgets everything between sessions.** Every new conversation starts from zero — re-discovering project structure, re-reading conventions, re-asking about deploy procedures. pi-memctx fixes this.
+`pi-memctx` gives [Pi](https://github.com/mariozechner/pi-mono) a local, durable, Markdown-native memory layer. It searches your project memory before each prompt, injects only the context that matters, and lets the agent work normally when memory is not enough.
 
-## The problem
+No database server. No hosted memory vendor. No new workflow for your users. Just launch Pi and ask the question.
 
-Without persistent memory, coding agents waste time and tokens on every session:
+## Quickstart
 
-```
-You: "How do I deploy to production?"
-
-Agent: Let me explore the project...
-  $ find . -name "*.yml" | grep deploy      # scanning...
-  $ cat .github/workflows/ci.yaml           # reading...
-  $ ls kubernetes/                           # more scanning...
-  $ cat README.md                            # still looking...
-  
-  → 30+ seconds, 8 tool calls, misses key details
-```
-
-## The fix
-
-pi-memctx loads project context **before the agent starts thinking**:
-
-```
-You: "How do I deploy to production?"
-
-Agent: Based on your deploy runbook:
-  1. Push to main triggers GitHub Actions
-  2. CI builds → Docker → ECR → Helm values update
-  3. ArgoCD auto-syncs to staging
-  4. Production requires manual approval in ArgoCD
-  
-  → 5 seconds, 0 tool calls, all key details correct
-```
-
-## Measured impact
-
-Run `bash benchmark/setup.sh && bash benchmark/run.sh` to measure on your own project.
-
-Latest local benchmark (`baseline` vs `qmd-economy`, 5 tasks, 1 repeat):
-
-| Metric | Baseline | qmd-economy | Gain |
-|---|---:|---:|---:|
-| Avg time to answer | 23.9s | 4.4s | **5.4× faster** |
-| Tool calls per task | 7.0 | 0.0 | **100% fewer** |
-| Quality facts found | 14/22 | 22/22 | **100% coverage** |
-| Provider tokens/task | 2,453 | 1,950 | **20% fewer** |
-| Visible tokens/task* | 545 | 175 | **68% fewer** |
-
-*Visible tokens are approximated from prompt + assistant text chars / 4. `qmd-economy` injects compact answer plans from qmd-backed fact cards, so the agent answers directly instead of exploring files or calling `memctx_search` for already-supported project questions.
-
-### What this means for your team
-
-| If your team runs... | You save... |
-|---|---|
-| 10 agent tasks/day | ~500K tokens/month, ~25 min/month |
-| 20 agent tasks/day | ~1M tokens/month, ~50 min/month |
-| 50 agent tasks/day | ~2.5M tokens/month, ~2 hours/month |
-
-Less tokens = lower API cost. Better answers = less rework. Faster responses = less waiting.
-
-## Install
+### 1. Install
 
 ```bash
 pi install npm:pi-memctx
 ```
 
-Or install directly from GitHub:
+Or install from GitHub:
 
 ```bash
 pi install git:github.com/weauratech/pi-memctx
 ```
 
-A GitHub Packages mirror is also published as `@weauratech/pi-memctx` for users who configure the GitHub npm registry.
-
-## Quick start
-
-### 1. Generate a pack from your project
+You can also verify the local installation:
 
 ```bash
-cd /path/to/your/repos
-pi -e pi-memctx
+npx pi-memctx doctor
+```
 
-# Inside pi:
+### 2. Start Pi with the extension
+
+```bash
+cd /path/to/your/workspace
+pi -e pi-memctx
+```
+
+### 3. Generate your first memory pack
+
+Inside Pi:
+
+```txt
 /memctx-pack-generate
 ```
 
-This performs deterministic discovery across your repos — including read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints — then builds a structured memory pack automatically.
+`pi-memctx` scans the workspace and creates a structured Markdown memory pack with context, decisions, runbooks, and indexes.
 
-### 2. Let the agent learn organically
+### 4. Ask normally
 
-As you work, the agent discovers and saves knowledge:
-
-```
-You: "remember that we use pgx instead of database/sql"
-
-Agent: Saved decision: pgx-over-database-sql
-       → packs/my-project/50-decisions/pgx-over-database-sql.md
+```txt
+How do I deploy this service to production?
 ```
 
-The pack grows over time with real operational knowledge.
+The user experience stays the same: prompt, wait, get the answer. The Memory Gateway works behind the scenes.
 
-### 3. Knowledge persists across sessions
+## Why it feels like magic
 
-Next session, the agent already knows:
+A normal coding agent starts every session cold:
 
+```txt
+User: How do I deploy the gateway service to production?
+Agent: I'll inspect the repo...
+       [tool] list files
+       [tool] read workflows
+       [tool] inspect Helm charts
+       [tool] search docs
+       ...
 ```
-You: "set up a new database connection"
 
-Agent: Based on your conventions, I'll use pgx with connection pooling
-       (per your decision in pgx-over-database-sql)...
+`pi-memctx` turns that into:
+
+```txt
+User: How do I deploy the gateway service to production?
+Agent: Merge to main, GitHub Actions builds Docker and pushes to ECR,
+       Helm values are updated, ArgoCD syncs to Kubernetes, staging is
+       automatic, and production is manual via ArgoCD approval/sync.
+```
+
+The difference is not a better prompt. It is **memory arriving before the model starts reasoning**.
+
+## Benchmark
+
+Latest local benchmark from the synthetic NovaPay fixture, 5 tasks, 1 repeat:
+
+```bash
+QMD_PATH=/tmp/pi-memctx-qmd/node_modules/.bin/qmd \
+BENCH_REPEATS=1 \
+BENCH_PROFILES="baseline gateway-lite gateway-full" \
+BENCH_TIMEOUT=120 \
+bash benchmark/run.sh /tmp/pi-memctx-benchmark-gateway-final
+```
+
+| Profile | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task | Failed tools/task | Quality |
+|---|---:|---:|---:|---:|---:|---:|
+| baseline | 24.2s | 2,315 | 594 | 5.4 | 0.2 | 12/22 |
+| gateway-lite | 5.18s | 2,016 | 238 | 0.0 | 0.0 | 21/22 |
+| gateway-full | 5.36s | 2,019 | 234 | 0.0 | 0.0 | 21/22 |
+
+Compared with baseline:
+
+| Profile | Latency | Provider tokens | Visible tokens | Tool calls | Quality |
+|---|---:|---:|---:|---:|---:|
+| gateway-lite | **78.6% faster** | **12.9% fewer** | **59.9% fewer** | **100% fewer** | **+9 facts** |
+| gateway-full | **77.9% faster** | **12.8% fewer** | **60.6% fewer** | **100% fewer** | **+9 facts** |
+
+Benchmarks are intentionally local and reproducible. Run them on your own projects:
+
+```bash
+bash benchmark/setup.sh /tmp/pi-memctx-benchmark
+QMD_PATH=$(pwd)/node_modules/.bin/qmd \
+BENCH_PROFILES="baseline gateway-lite gateway-full" \
+bash benchmark/run.sh /tmp/pi-memctx-benchmark
 ```
 
 ## How it works
 
+`pi-memctx` is a Memory Gateway between the user and the main LLM.
+
+```txt
+User prompt
+   │
+   ▼
+Memory Gateway
+   ├─ detects the active pack
+   ├─ retrieves relevant Markdown memories with qmd or grep fallback
+   ├─ ranks candidates with cheap semantic coverage
+   ├─ builds a compact local memory summary
+   └─ injects only useful context
+   │
+   ▼
+Pi agent answers normally
+   ├─ uses memory when sufficient
+   ├─ inspects the repo when memory is partial or stale
+   └─ can save durable discoveries back to Markdown
 ```
-pi starts → detect pack for cwd → load context
-                                      │
-user sends prompt ────────────────────┤
-                                      │
-  1. Search pack for relevant memories (policy-driven qmd/grep retrieval)
-  2. Build prioritized context (manifest → context → search → actions → decisions → runbooks)
-  3. Inject into system prompt (16K char budget)
-                                      │
-agent responds ───────────────────────┤
-                                      │
-  4. Agent can save learnings (memctx_save)
-  5. Autosave can queue high-value memory candidates
-  6. Session handoff captured on compaction
-```
 
-### Context priority
+The gateway does **not** replace the main LLM. It does the boring part first: finding the right project memory, compressing it, and preventing redundant tool exploration when the answer is already known.
 
-Not everything fits. Sections are included by priority — lower-priority content is trimmed first:
+## Profiles
 
-| Priority | What | Budget |
+| Profile | Best for | Behavior |
 |---|---|---|
-| 1 | Pack manifest + indexes | 2,000 chars |
-| 2 | Context packs (stack, conventions) | 3,000 chars |
-| 3 | Search results for current prompt | 2,500 chars |
-| 4 | Recent actions | 2,000 chars |
-| 5 | Decisions | 2,000 chars |
-| 6 | Runbooks | 2,000 chars |
+| `gateway-lite` | Speed and low overhead | Conservative local judge, compact context, autosave off. |
+| `gateway` | Default daily use | Balanced retrieval, autosave enabled, LLM assistance only when useful. |
+| `gateway-full` | Higher-confidence answers | More context capacity, but now uses the same fast gateway architecture instead of expensive always-on judging. |
 
-## Pack structure
+Switch profiles inside Pi:
 
-Packs are just Markdown files with frontmatter. Edit them in any editor or Obsidian.
-
+```txt
+/memctx-profile gateway-lite
+/memctx-profile gateway
+/memctx-profile gateway-full
+/memctx-profile status
 ```
-~/.pi/agent/memory-vault/packs/my-project/
+
+The old profile names are compatibility-mapped into the new gateway runtime.
+
+## Memory packs
+
+A pack is a directory of Markdown files with frontmatter. You can edit it with any editor, commit it, review it, or open it in Obsidian.
+
+```txt
+packs/my-project/
   00-system/
     pi-agent/
-      memory-manifest.md     # Pack entrypoint
-      resource-map.md        # Repos, services, environments
+      memory-manifest.md
+      resource-map.md
     indexes/
-      context-index.md       # Links to context packs
-      decision-index.md      # Links to decisions
-      runbook-index.md       # Links to runbooks
+      context-index.md
+      decision-index.md
+      runbook-index.md
   20-context/
-    backend.md               # Stack, architecture, conventions
-    frontend.md              # Framework, components, build commands
+    api.md
+    web.md
+    infra.md
   50-decisions/
-    001-hexagonal-arch.md    # Why we chose this architecture
-    002-use-pgx.md           # Why pgx over database/sql
+    001-hexagonal-architecture.md
+    002-use-pgx.md
   70-runbooks/
-    deploy.md                # Step-by-step deploy procedure
-    terraform.md             # Infrastructure operations
+    deploy.md
+    terraform.md
 ```
 
-## Tools
+Recommended note types:
 
-pi-memctx exposes tools to the agent. You can ask the agent to use them directly, and the extension also performs automatic retrieval before each turn.
-
-### `memctx_search`
-
-Search across active-pack files:
-
-```txt
-use memctx_search to find information about deploy
-```
-
-Parameters:
-
-| Parameter | Values | Default | Purpose |
-|---|---|---:|---|
-| `query` | string | required | Search terms or natural-language query. |
-| `mode` | `keyword`, `semantic`, `deep` | `keyword` | Search strategy. Semantic/deep require qmd. |
-| `limit` | number | `5` | Maximum result count. |
-
-Search behavior:
-
-1. qmd keyword/semantic/deep search when qmd is available;
-2. grep-style Markdown fallback when qmd is unavailable, times out, or misses;
-3. cross-pack hints when the active pack has no match but another pack appears relevant.
-
-qmd resolution order:
-
-1. `MEMCTX_QMD_BIN`
-2. `qmd` on `PATH`
-3. optional bundled `@tobilu/qmd` dependency at `node_modules/.bin/qmd`
-4. grep fallback
-
-Tuning:
-
-```bash
-MEMCTX_QMD_PROBE_TIMEOUT_MS=3000  # default: 1200
-```
-
-Without qmd, both automatic context injection and `memctx_search` use keyword grep fallback.
-
-### `memctx_save`
-
-Persist learnings to the active pack:
-
-```txt
-save this as a decision: we use integer cents for all monetary values
-```
-
-Parameters:
-
-| Parameter | Values | Purpose |
-|---|---|---|
-| `type` | `observation`, `decision`, `action`, `runbook`, `context` | Destination note type. |
-| `title` | string | Note title and filename slug source. |
-| `content` | string | Markdown body. |
-| `tags` | string[] | Optional extra tags. |
-
-Behavior:
-
-- writes Markdown notes with frontmatter into the active pack;
-- appends to existing notes with the same slug;
-- updates a matching index when available;
-- blocks common secret, token, API key, AWS key, and private-key patterns.
+| Type | Use it for |
+|---|---|
+| `context` | Stack, services, repositories, conventions, environments. |
+| `decision` | Architecture and technical decisions with rationale. |
+| `runbook` | Repeatable operational procedures. |
+| `observation` | Durable facts discovered during work. |
+| `action` | Completed work, migrations, deploys, incident notes. |
 
 ## Commands
 
-These slash commands are available inside Pi after the extension loads.
+| Command | Purpose |
+|---|---|
+| `/memctx-pack-generate` | Create a memory pack from the current workspace. |
+| `/memctx-pack` | Select or show the active pack. |
+| `/memctx-pack-status` | Show active pack and retrieval status. |
+| `/memctx-profile` | Switch between `gateway-lite`, `gateway`, and `gateway-full`. |
+| `/memctx-config` | Show current config. |
+| `/memctx-retrieval` | Configure retrieval policy. |
+| `/memctx-autosave` | Configure autosave behavior. |
+| `/memctx-save-queue` | Review queued memory candidates. |
+| `/memctx-doctor` | Diagnose qmd, packs, and configuration. |
+| `/memctx-pack-enrich` | Enrich a pack with discovered project structure. |
 
-| Command | Usage | What |
-|---|---|---|
-| `/memctx-profile` | `/memctx-profile qmd-economy\|auto\|status` | Apply a zero-config behavior profile. Default is `auto`; `qmd-economy` is recommended for lowest tool/token usage. |
-| `/memctx-config` | `/memctx-config status\|reset` | Inspect or reset persistent config in `~/.config/pi-memctx/config.json`. |
-| `/memctx-pack` | `/memctx-pack` or `/memctx-pack <name>` | List packs with a picker or switch directly. |
-| `/memctx-pack-status` | `/memctx-pack-status` | Show active pack, profile/config, selection reason/confidence, last switch, qmd status, strict mode, LLM stats, file count, and last retrieval. |
-| `/memctx-strict` | `/memctx-strict on\|off\|status` | Toggle stronger Memory Gate guidance. Defaults to `on`; project-specific answers should call `memctx_search` unless injected memory fully supports the answer. |
-| `/memctx-auto-switch` | `/memctx-auto-switch off\|cwd\|prompt\|all\|status` | Configure cwd/prompt-based automatic pack switching. |
-| `/memctx-llm` | `/memctx-llm off\|assist\|first\|status` | Configure LLM assistance for prompt pack switching, retrieval expansion, autosave candidates, and pack generation. |
-| `/memctx-retrieval` | `/memctx-retrieval auto\|fast\|balanced\|deep\|strict\|status` | Configure automatic retrieval depth. `auto` is the default and is latency-bounded. |
-| `/memctx-autosave` | `/memctx-autosave off\|suggest\|confirm\|auto\|status` | Configure memory candidate capture. `auto` saves high-confidence candidates without queue approval by default. |
-| `/memctx-save-queue` | `/memctx-save-queue list\|approve <id>\|reject <id>\|clear` | Review queued memory candidates. |
-| `/memctx-doctor` | `/memctx-doctor` | Diagnose active pack, qmd, retrieval, autosave, placeholders, duplicate note slugs, and secret-scan warnings. |
-| `/memctx-pack-enrich` | `/memctx-pack-enrich [source-dir]` | LLM-enrich an existing active pack from source evidence. |
-| `/memctx-pack-generate` | `/memctx-pack-generate [path] [slug]` | Generate a structured pack from a directory of repositories, with optional LLM deep enrichment. |
+Deprecated aliases such as `/pack` and `/pack-generate` are still registered for compatibility.
 
-Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
+## Tools
 
-### `/memctx-pack-status` example
+### `memctx_search`
+
+Search the active memory pack:
 
 ```txt
-Profile: qmd-economy
-Config path: ~/.config/pi-memctx/config.json
-Active pack: opensource
-Pack path: ~/.pi/agent/memory-vault/packs/opensource
-Auto-switch: cwd
-Retrieval policy: fast
-Retrieval budget: 250ms
-Context pipeline: qmd-economy
-Context budget: 650 tokens
-Autosave: off
-Autosave low-confidence queue: off
-Save queue: 0 pending
-Selection: high (112)
-Last switch: none
-qmd: available
-qmd source: local-dependency
-Strict mode: off
-LLM mode: off
-LLM calls: 0
-Overlay: 📦 opensource · profile:qmd-economy · qmd:3 · ctx:650 · retrieval:fast · save:off · strict:off · llm:off
-Last retrieval: qmd-economy
+Use memctx_search to find the deploy runbook.
 ```
 
-### `/memctx-pack-generate` discovery
+Parameters:
 
-`/memctx-pack-generate` performs deterministic local discovery before writing notes. It detects normal repos, hidden allowlist repos like `.github`, Git remotes, Node/TS and Go manifests, package scripts, safe commands, GitHub Actions, read-first docs, infra hints, placeholder repos, and redacts sensitive-looking values before persistence.
+| Parameter | Values | Default |
+|---|---|---|
+| `query` | string | required |
+| `mode` | `keyword`, `semantic`, `deep` | `keyword` |
+| `limit` | number | `5` |
 
-When `MEMCTX_LLM_MODE=assist` or `first` and a model is selected, it then asks the LLM to select important files from compact inventories and synthesize architecture notes from redacted snippets.
+When the Memory Gateway already injected sufficient memory, the agent is instructed not to call `memctx_search` again. That keeps answers fast and prevents duplicate context retrieval.
 
-See [Pack generation](docs/pack-generate.md) for details.
+### `memctx_save`
 
-## Multiple packs
+Save durable knowledge into the active pack:
 
-With multiple packs, pi-memctx auto-detects the best one based on your working directory:
+```txt
+Remember that production deploys require ArgoCD manual approval.
+```
+
+The tool supports:
+
+- `observation`
+- `decision`
+- `action`
+- `runbook`
+- `context`
+
+Secret-looking content is blocked.
+
+## qmd integration
+
+`pi-memctx` uses [`@tobilu/qmd`](https://www.npmjs.com/package/@tobilu/qmd) when available for fast memory retrieval. If qmd is not available, it falls back to grep-based search.
+
+Resolution order:
+
+1. `QMD_PATH` or `MEMCTX_QMD_BIN`
+2. optional dependency `@tobilu/qmd`
+3. local `.bin` or bundled/vendor path
+4. `PATH`
+5. grep fallback
+
+Check your setup:
 
 ```bash
-cd ~/code/my-api       # → loads "my-api" pack
-cd ~/code/my-infra     # → loads "infra" pack
-cd ~/code              # → loads org-level pack
+npx pi-memctx doctor
 ```
 
-For most users, no setup is needed: `profile:auto` is applied by default. Switch to `qmd-economy` when you want the lowest tool/token usage for project Q&A:
+## Safety model
 
-```txt
-/memctx-profile qmd-economy  # compact qmd-backed answer plans, no autosave/LLM, fast retrieval
-/memctx-profile auto         # default general-purpose behavior
-```
+`pi-memctx` is local-first and intentionally boring about sensitive data.
 
-Switch mid-session with `/memctx-pack`, or enable prompt-based switching:
+It will not save:
 
-```txt
-/memctx-auto-switch all
-/memctx-llm first
-```
+- API keys
+- tokens
+- passwords
+- private keys
+- customer data
+- payment card data
+- sensitive payloads
 
-`assist` mode uses deterministic matching first and asks the LLM for ambiguous prompt decisions. `first` mode asks the LLM whenever possible while keeping deterministic validation/fallbacks.
+Memory is Markdown on disk. You can inspect every byte.
 
-For more aggressive memory behavior:
+## Configuration
 
-```txt
-/memctx-retrieval strict      # more retrieval attempts before each turn
-/memctx-autosave auto        # save high-confidence candidates automatically
-/memctx-save-queue           # review pending candidates, if any
-/memctx-doctor               # diagnose pack/runtime health
-```
+Most users should start with the defaults. Advanced users can configure behavior with environment variables or `/memctx-profile`.
 
-`retrieval:auto` does not imply full strict retrieval; it performs bounded retrieval with a default 1000ms latency budget. Use `/memctx-retrieval strict` when you explicitly prefer depth over latency.
+Common environment variables:
 
-Switch mid-session with `/memctx-pack`.
-
-## Pack locations
-
-Packs are resolved in order:
-
-| Priority | Path | Use case |
-|---|---|---|
-| 1 | `MEMCTX_PACKS_PATH` env var | Explicit override |
-| 2 | `<cwd>/.pi/memory-vault/packs/` | Project-local (share via git) |
-| 3 | `~/.pi/agent/memory-vault/packs/` | Global default |
-
-## Benchmark
-
-Measure the impact on your own project:
-
-```bash
-# Setup fictional test scenario
-bash benchmark/setup.sh
-
-# Run 5 tasks: baseline vs qmd-economy
-bash benchmark/run.sh
-```
-
-Recent run (`20260501-180558`): `qmd-economy` answered all 5 tasks with **0 tool calls**, **22/22 quality facts**, **4.4s avg latency**, and **~175 visible tokens/task**. Baseline averaged 7 tool calls, 14/22 quality facts, 23.9s latency, and ~545 visible tokens/task.
-
-## Documentation
-
-- [Getting started](docs/getting-started.md)
-- [Architecture](docs/architecture.md)
-- [Safety](docs/safety.md)
-- [Search](docs/search.md)
-- [Persistence](docs/persistence.md)
-- [Pack generation](docs/pack-generate.md)
-- [Development](docs/development.md)
-- [Publishing](docs/publishing.md)
+| Variable | Purpose |
+|---|---|
+| `MEMCTX_CONTEXT_TOKEN_BUDGET` | Approximate injected context budget. |
+| `MEMCTX_CONTEXT_MAX_ITEMS` | Maximum memory items to include. |
+| `MEMCTX_RETRIEVAL` | Retrieval policy: `fast`, `balanced`, `deep`, `strict`, `auto`. |
+| `MEMCTX_GATEWAY_JUDGE` | Gateway judge mode: `off`, `conservative`, `auto`, `main-llm`. |
+| `MEMCTX_AUTOSAVE` | Autosave mode: `off`, `suggest`, `confirm`, `auto`. |
+| `QMD_PATH` / `MEMCTX_QMD_BIN` | Explicit qmd binary path. |
 
 ## Development
 
+Requirements:
+
+- Node.js 20+
+- Bun for tests
+- Pi coding agent
+
+Install dependencies:
+
 ```bash
-npm ci
+npm install
+```
+
+Run checks:
+
+```bash
 npm run typecheck
 npm test
 npm run test:e2e
+```
+
+Run all CI checks:
+
+```bash
 npm run ci
 ```
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md) before opening a pull request.
+Run benchmark:
+
+```bash
+bash benchmark/setup.sh /tmp/pi-memctx-benchmark
+QMD_PATH=/tmp/pi-memctx-qmd/node_modules/.bin/qmd \
+BENCH_REPEATS=1 \
+BENCH_PROFILES="baseline gateway-lite gateway-full" \
+BENCH_TIMEOUT=120 \
+bash benchmark/run.sh /tmp/pi-memctx-benchmark
+```
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+Good contributions include:
+
+- better language-agnostic retrieval heuristics
+- safer memory extraction
+- clearer benchmark fixtures
+- docs and examples
+- profile tuning with reproducible numbers
+
+Please do not commit private company memory packs, customer data, secrets, or benchmark fixtures derived from private repositories.
 
 ## License
 
