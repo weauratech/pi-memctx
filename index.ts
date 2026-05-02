@@ -936,8 +936,43 @@ function conservativeGatewayJudge(prompt: string, candidates: GatewayCandidate[]
 	return cheapSemanticJudge(prompt, candidates);
 }
 
+function isPrecisionRepoQuestion(prompt: string): boolean {
+	const text = normalizeSearchText(prompt);
+	const subject = /\b(repo|repository|reposit[oó]rio|service|servi[cç]o|component|componente|app|application|aplica[cç][aã]o|deploy|deployment)\b/.test(text);
+	const asksForTruth = /\b(how|works|funciona|detail|detalhe|detalhes|architecture|arquitetura|estrutura|flow|fluxo|deploy|deployment|config|configuration|source|files|arquivos)\b/.test(text);
+	return subject && asksForTruth;
+}
+
 async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[], ctx: ExtensionContext): Promise<GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }> {
 	const fast = conservativeGatewayJudge(prompt, candidates);
+	const precisionRepoQuestion = isPrecisionRepoQuestion(prompt);
+	const llmCandidates = () => candidates.map((candidate) => ({
+		id: candidate.id,
+		path: candidate.path,
+		content: truncate(stripMarkdownMetadata(candidate.content), precisionRepoQuestion ? 1600 : 1000),
+	}));
+	if (precisionRepoQuestion && ctx.model) {
+		const decision = await completeJsonWithModel<GatewayJudgeDecision>(ctx, "memory-gateway-precision", [
+			"You are a precision judge for a coding-agent memory gateway.",
+			"The user is asking for repo/component/deploy details. Decide if memory is precise enough to answer without inspecting source-of-truth files.",
+			"Mark sufficient only when memory contains concrete, evidence-backed details such as exact paths, components, configs, flows, and constraints for the requested subject.",
+			"Mark partial when memory is useful but generic, possibly stale, generated from previous sessions, or lacks exact source-file evidence for the requested subject.",
+			"Mark insufficient when memory is wrong-target or mostly generic background.",
+			"Return JSON only: status one of sufficient|partial|insufficient|conflicting, confidence 0..1, relevantCandidateIds[], facts[], missing[], conflicts[], reason.",
+			"Do not answer the user.",
+		].join("\n"), { prompt: truncate(prompt, 900), candidates: llmCandidates() });
+		if (decision?.status) return { ...decision, backend: "main-llm" };
+	}
+	if (precisionRepoQuestion && fast.status === "sufficient") {
+		return {
+			...fast,
+			status: "partial",
+			confidence: Math.min(fast.confidence ?? 0.75, 0.74),
+			missing: [...(fast.missing ?? []), "Verify current source-of-truth files before giving precise repo/component details."],
+			reason: fast.reason ? `${fast.reason}; precise repo/component prompt requires source verification` : "Precise repo/component prompt requires source verification",
+			backend: "conservative",
+		};
+	}
 	if (gatewayJudgeMode === "off") return { ...fast, backend: "none" };
 	if (gatewayJudgeMode === "conservative") return { ...fast, backend: "conservative" };
 	if (gatewayJudgeMode === "auto") {
@@ -956,7 +991,7 @@ async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[]
 			"Reject generic or wrong-target memory even if it shares broad terms. Example: container/Kubernetes gateway deploy is insufficient for Lambda version deployment.",
 			"Return JSON only: status one of sufficient|partial|insufficient|conflicting, confidence 0..1, relevantCandidateIds[], facts[], missing[], conflicts[], reason.",
 			"Facts must be concise, project-specific, and only from relevant candidates. Do not answer the user.",
-		].join("\n"), { prompt: truncate(prompt, 800), candidates });
+		].join("\n"), { prompt: truncate(prompt, 800), candidates: llmCandidates() });
 		if (decision?.status) return { ...decision, backend: "main-llm" };
 	}
 	return { ...fast, backend: "conservative" };
@@ -2202,7 +2237,7 @@ const SAVE_QUEUE_PATH = path.join(SAVE_QUEUE_DIR, "save-queue.json");
 
 function sensitivePatternHit(title: string, content: string): boolean {
 	const sensitivePatterns = [
-		/(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)\s*[:=]/i,
+		/(?:password|passwd|pwd|senha|contrase(?:ñ|n)a|secret|token|api[_-]?key|private[_-]?key|credential|credencial)\s*[:=]/i,
 		/(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/,
 		/(?:AKIA[0-9A-Z]{16})/,
 		/(?:ghp_[a-zA-Z0-9]{36})/,
@@ -2233,16 +2268,51 @@ function enqueueMemoryCandidate(candidate: MemoryCandidate) {
 	if (!duplicate) writeSaveQueue([...queue, candidate]);
 }
 
+function exactContextTargetNote(candidate: MemoryCandidate): string | null {
+	if (!activePackPath || candidate.type !== "context") return null;
+	const contextDir = path.join(activePackPath, "20-context");
+	if (!fs.existsSync(contextDir)) return null;
+	const text = `${candidate.title}\n${candidate.tags.join("\n")}\n${candidate.content}`;
+	const slugs = new Set<string>([slugify(candidate.title)]);
+	for (const tag of candidate.tags) {
+		const match = tag.match(/^(?:repo|component|service|app)\/(.+)$/i);
+		if (match?.[1]) slugs.add(slugify(match[1]));
+	}
+	for (const match of text.matchAll(/`([^`\n]+)`/g)) {
+		const value = match[1].trim();
+		const firstSegment = value.replace(/^\/+/, "").split(/[\\/]/)[0];
+		if (firstSegment && firstSegment.length > 2) slugs.add(slugify(firstSegment));
+		const basename = path.basename(value);
+		if (basename && basename.length > 2 && !basename.includes(".")) slugs.add(slugify(basename));
+	}
+	for (const slug of [...slugs].filter(Boolean)) {
+		const exact = path.join(contextDir, `${slug}.md`);
+		if (fs.existsSync(exact)) return exact;
+	}
+	for (const file of scanPackFiles(contextDir).slice(0, 120)) {
+		const base = slugify(path.basename(file, ".md"));
+		if ([...slugs].some((slug) => slug.length > 2 && base === slug)) return file;
+	}
+	return null;
+}
+
 function findSimilarNote(candidate: MemoryCandidate): string | null {
 	if (!activePackPath) return null;
-	const terms = candidate.title.toLowerCase().split(/\s+/).filter((term) => term.length > 3).slice(0, 6);
+	const exactContext = exactContextTargetNote(candidate);
+	if (exactContext) return exactContext;
+	const stop = new Set(["repo", "repository", "service", "component", "application", "deploy", "deployment", "config", "context", "overview", "korporate"]);
+	const terms = candidate.title.toLowerCase().split(/\s+/).filter((term) => term.length > 3 && !stop.has(term)).slice(0, 8);
 	if (terms.length === 0) return null;
 	const dirs = NOTE_TYPE_DIRS[candidate.type].map((dir) => path.join(activePackPath, dir)).filter((dir) => fs.existsSync(dir));
 	for (const dir of dirs) {
 		for (const file of scanPackFiles(dir).slice(0, 40)) {
 			const content = readFileSafe(file)?.toLowerCase() ?? "";
+			const basename = slugify(path.basename(file, ".md"));
+			const titleSlug = slugify(candidate.title);
+			if (basename === titleSlug) return file;
 			const score = terms.filter((term) => content.includes(term)).length;
-			if (score >= Math.min(3, terms.length)) return file;
+			const threshold = candidate.type === "context" ? Math.max(2, terms.length) : Math.min(3, terms.length);
+			if (score >= threshold) return file;
 		}
 	}
 	return null;
@@ -2308,6 +2378,10 @@ function collectTurnSnippets(messages: unknown[]): { snippets: string[]; hasTool
 			snippets.push(`Assistant: ${text}`);
 			signalScore += durableSignalScore(text);
 		}
+		if (!["user", "assistant"].includes(role) && text) {
+			snippets.push(`Tool result (${role || "tool"}): ${truncate(text, 3000)}`);
+			signalScore += durableSignalScore(text);
+		}
 		if (Array.isArray(m.content)) {
 			for (const block of m.content) {
 				if (!block || typeof block !== "object") continue;
@@ -2354,6 +2428,8 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		"If this was a rich discovery turn, fan out into multiple complementary notes instead of collapsing everything into one note.",
 		"Use context for durable repo/component overviews, observation for factual discoveries/counts/caveats, runbook for repeatable procedures, decision for conventions or architectural choices, action for completed work.",
 		"When discovery is about an existing repo/component, make one context candidate whose title matches that repo/component so it can update related context instead of creating transcript noise.",
+		"Prefer preserving discovered architecture/configuration specifics over terse summaries: component names, exact safe source paths, environment split, deploy files, scaling/probe/ingress patterns, and operational caveats should be persisted when evidence-backed.",
+		"When many details were discovered for one component, create or update a context note plus complementary observation/runbook notes rather than a shallow decision-only memory.",
 		"Keep each note concise but independently useful. Include source paths when available. Do not copy secret values.",
 		"Return ONLY JSON with either candidates[] or category arrays: contextUpdates[], observations[], runbooks[], decisions[], actions[]. Each item: {shouldSave,type,title,content,tags[],confidence,reason}.",
 		"For simple turns return at most 3 total items. For rich discovery return up to 8 total items: at most 2 context, 3 observations, 3 runbooks, 1 decision, 1 action.",
@@ -2499,7 +2575,7 @@ const SECRET_VALUE_PATTERNS = [
 	/AKIA[0-9A-Z]{16}/g,
 	/-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----[\s\S]*?-----END (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g,
 	/(authorization\s*:\s*bearer\s+)[^\s`'"<>]+/gi,
-	/((?:api[_-]?key|secret|token|password|passwd|pwd)\s*[:=]\s*)[^\s`'"<>]+/gi,
+	/((?:api[_-]?key|secret|token|password|passwd|pwd|senha|contrase(?:ñ|n)a|credential|credencial)\s*[:=]\s*)[^\s`'"<>]+/gi,
 ];
 
 function safeExecGit(repoPath: string, args: string[]): string {
@@ -4396,7 +4472,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Safety check
 			const sensitivePatterns = [
-				/(?:password|passwd|secret|token|api[_-]?key|private[_-]?key|credential)\s*[:=]/i,
+				/(?:password|passwd|pwd|senha|contrase(?:ñ|n)a|secret|token|api[_-]?key|private[_-]?key|credential|credencial)\s*[:=]/i,
 				/(?:-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/,
 				/(?:AKIA[0-9A-Z]{16})/,  // AWS access key
 				/(?:ghp_[a-zA-Z0-9]{36})/,  // GitHub token
@@ -4416,65 +4492,25 @@ export default function (pi: ExtensionAPI) {
 				}
 			}
 
-			const noteDir = resolveNoteDir(activePackPath, noteType as NoteType);
-			const today = todayStr();
-			const fileSlug = slugify(title);
-			const fileName = noteType === "action"
-				? `${today}-${fileSlug}.md`
-				: `${fileSlug}.md`;
-			const filePath = path.join(noteDir, fileName);
+			const saved = saveMemoryCandidate({
+				id: `manual-${Date.now().toString(36)}`,
+				type: noteType as NoteType,
+				title,
+				content,
+				tags: tags.map(String),
+				confidence: 1,
+				reason: "Manual memctx_save",
+				createdAt: nowTimestamp(),
+				pack: activePack,
+			});
 
-			// Check for existing note with same slug
-			if (fs.existsSync(filePath)) {
-				// Append to existing note
-				const existing = readFileSafe(filePath) ?? "";
-				const timestamp = nowTimestamp();
-				const update = `\n\n---\n\n## Update (${timestamp})\n\n${content}\n`;
-				fs.writeFileSync(filePath, existing + update);
-
-				if (qmdAvailable) {
-					qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-				}
-
-				const rel = path.relative(activePackPath, filePath);
-				return {
-					content: [{ type: "text" as const, text: `Updated existing note: ${rel}` }],
-					details: { path: rel, action: "updated" },
-				};
-			}
-
-			// Create new note
-			const noteContent = buildNote(activePack, noteType as NoteType, title, content, tags);
-			fs.writeFileSync(filePath, noteContent);
-
-			// Update index if it exists
-			const indexDir = path.join(activePackPath, "00-system", "indexes");
-			const indexCandidates = [
-				`${noteType}-index.md`,
-				"context-index.md",
-			];
-			for (const indexFile of indexCandidates) {
-				const indexPath = path.join(indexDir, indexFile);
-				if (fs.existsSync(indexPath)) {
-					const indexContent = readFileSafe(indexPath) ?? "";
-					const rel = path.relative(activePackPath, filePath).replace(".md", "");
-					const wikilink = `| [[packs/${activePack}/${rel}\\|${title}]] | ${noteType} |`;
-					if (!indexContent.includes(fileSlug)) {
-						fs.writeFileSync(indexPath, indexContent.trimEnd() + "\n" + wikilink + "\n");
-					}
-					break;
-				}
-			}
-
-			// Re-index
 			if (qmdAvailable) {
 				qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 			}
 
-			const rel = path.relative(activePackPath, filePath);
 			return {
-				content: [{ type: "text" as const, text: `Saved ${noteType}: ${rel}` }],
-				details: { path: rel, action: "created", type: noteType },
+				content: [{ type: "text" as const, text: `${saved.action === "updated" ? "Updated existing note" : `Saved ${noteType}`}: ${saved.rel}` }],
+				details: { path: saved.rel, action: saved.action, type: noteType },
 			};
 		},
 	});
