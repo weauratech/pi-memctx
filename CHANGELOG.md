@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.10.0] - 2026-05-02
+
+### Changed
+
+- Make persistence richer by default: when a completed turn has detailed final-answer content, saved candidates are enriched with reusable structured detail instead of terse one-paragraph summaries.
+- Force sanitized `80-sessions` rich-persistence snapshots when durable memories are saved from large detailed turns, preserving the original planning/discovery detail for future retrieval.
+- Strengthen the memory curator prompt so actions, decisions, runbooks, context notes, and observations include enough evidence-backed detail to be reused without the original conversation.
+
+### Fixed
+
+- Normalize redundant note type prefixes such as `Runbook:`/`Action:` from note titles, headings, ids, and filenames.
+
+
 ## [0.9.5] - 2026-05-02
 
 ### Fixed

@@ -2198,6 +2198,22 @@ export function slugify(text: string): string {
 		.slice(0, 60);
 }
 
+export function normalizeNoteTitle(noteType: NoteType, title: string): string {
+	let normalized = title.replace(/\s+/g, " ").trim();
+	const typePrefixes: Record<NoteType, RegExp[]> = {
+		runbook: [/^(?:runbook|procedimento|roteiro)\s*[:—-]\s*/i],
+		action: [/^(?:action|a[cç][aã]o|completed|feito|entrega)\s*[:—-]\s*/i],
+		decision: [/^(?:decision|decis[aã]o|adr)\s*[:—-]\s*/i],
+		observation: [/^(?:observation|observa[cç][aã]o|finding|discovery)\s*[:—-]\s*/i],
+		context: [/^(?:context|contexto|overview|vis[aã]o geral)\s*[:—-]\s*/i],
+		session: [/^(?:session|sess[aã]o|snapshot)\s*[:—-]\s*/i],
+	};
+	for (const pattern of typePrefixes[noteType] ?? []) {
+		normalized = normalized.replace(pattern, "").trim();
+	}
+	return normalized || title.trim() || `${noteType} note`;
+}
+
 /**
  * Build a Markdown note with pack-compliant frontmatter.
  */
@@ -2209,7 +2225,8 @@ export function buildNote(
 	tags: string[] = [],
 ): string {
 	const today = new Date().toISOString().slice(0, 10);
-	const slug = slugify(title);
+	const noteTitle = normalizeNoteTitle(noteType, title);
+	const slug = slugify(noteTitle);
 	const id = `${noteType}.${packSlug}.${slug}`;
 
 	const allTags = [
@@ -2221,7 +2238,7 @@ export function buildNote(
 	return `---
 type: ${noteType}
 id: ${id}
-title: ${title}
+title: ${noteTitle}
 status: active
 source_of_truth: false
 freshness: current
@@ -2230,7 +2247,7 @@ tags:
 ${allTags.map((t) => `  - ${t}`).join("\n")}
 ---
 
-# ${title}
+# ${noteTitle}
 
 ${content}
 
@@ -2271,9 +2288,10 @@ function writeSaveQueue(queue: MemoryCandidate[]) {
 }
 
 function enqueueMemoryCandidate(candidate: MemoryCandidate) {
+	const normalizedCandidate = { ...candidate, title: normalizeNoteTitle(candidate.type, candidate.title) };
 	const queue = readSaveQueue();
-	const duplicate = queue.some((item) => item.pack === candidate.pack && slugify(item.title) === slugify(candidate.title));
-	if (!duplicate) writeSaveQueue([...queue, candidate]);
+	const duplicate = queue.some((item) => item.pack === normalizedCandidate.pack && slugify(normalizeNoteTitle(item.type, item.title)) === slugify(normalizedCandidate.title));
+	if (!duplicate) writeSaveQueue([...queue, normalizedCandidate]);
 }
 
 function exactContextTargetNote(candidate: MemoryCandidate): string | null {
@@ -2329,6 +2347,7 @@ function findSimilarNote(candidate: MemoryCandidate): string | null {
 
 function saveMemoryCandidate(candidate: MemoryCandidate): { rel: string; action: "created" | "updated" } {
 	if (!activePackPath || !activePack) throw new Error("No active memory pack");
+	candidate = { ...candidate, title: normalizeNoteTitle(candidate.type, candidate.title), content: sanitizeEvidence(candidate.content) };
 	if (sensitivePatternHit(candidate.title, candidate.content)) throw new Error("Candidate appears to contain secrets");
 	const noteDir = resolveNoteDir(activePackPath, candidate.type);
 	const fileSlug = slugify(candidate.title);
@@ -2416,7 +2435,7 @@ function normalizeCuratorCandidate(raw: MemoryCuratorCandidate): MemoryCandidate
 	return {
 		id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
 		type: raw.type as NoteType,
-		title: truncate(raw.title, 120),
+		title: truncate(normalizeNoteTitle(raw.type as NoteType, raw.title), 120),
 		content,
 		tags: Array.isArray(raw.tags) ? raw.tags.map(String).slice(0, 8) : ["autolearn"],
 		confidence: typeof raw.confidence === "number" ? Math.max(0, Math.min(1, raw.confidence)) : 0.7,
@@ -2433,12 +2452,16 @@ async function curateMemoryCandidatesFromTurn(ctx: ExtensionContext, snippets: s
 		"The user may write in any language. Judge semantically; do not rely on specific product, repo, or keyword names.",
 		"Extract durable future-use memory from the completed turn, if any.",
 		"Save only evidence-backed project/workspace knowledge, conventions, runbooks, architecture, business rules, completed actions, repository discoveries, or explicit durable user/team preferences.",
+		"If you decide to persist, create notes that are rich enough for a future agent to reuse without the original conversation. Avoid shallow one-paragraph memories when the turn contains concrete details.",
 		"Do not save transient chatter, generic programming advice, guesses, secrets, credentials, tokens, private keys, customer data, or sensitive payloads. If a secret-like value appeared, summarize only the risk without the value.",
-		"If this was a rich discovery turn, fan out into multiple complementary notes instead of collapsing everything into one note.",
+		"If this was a rich discovery, planning, troubleshooting, or implementation turn, fan out into multiple complementary notes instead of collapsing everything into one note.",
 		"Use context for durable repo/component overviews, observation for factual discoveries/counts/caveats, runbook for repeatable procedures, decision for conventions or architectural choices, action for completed work, session for a rich sanitized discovery snapshot when the final answer contains many durable details.",
 		"When discovery is about an existing repo/component, make one context candidate whose title matches that repo/component so it can update related context instead of creating transcript noise.",
-		"Prefer preserving discovered architecture/configuration specifics over terse summaries: component names, exact safe source paths, environment split, deploy files, scaling/probe/ingress patterns, and operational caveats should be persisted when evidence-backed.",
-		"When many details were discovered for one component, create or update a context note plus complementary observation/runbook notes rather than a shallow decision-only memory.",
+		"Prefer preserving discovered architecture/configuration specifics over terse summaries: component names, exact safe source paths, environment split, deploy files, scaling/probe/ingress patterns, requirements, permissions, rollout phases, validation, and operational caveats should be persisted when evidence-backed.",
+		"When many details were discovered for one component, plan, or procedure, create or update a context note plus complementary observation/runbook/session notes rather than a shallow decision/action-only memory.",
+		"For actions, include a structured deliverable summary, key artifacts, validation/result, and related follow-up context; the action can be concise but must not be generic.",
+		"For decisions, include decision, context, rationale, alternatives considered when present, consequences, and review caveats.",
+		"For runbooks, include trigger, prerequisites, step-by-step procedure, safe/dangerous commands or files, rollback, and troubleshooting when present.",
 		"Keep each note concise but independently useful. Include source paths when available. Do not copy secret values.",
 		"Return ONLY JSON with either candidates[] or category arrays: contextUpdates[], observations[], runbooks[], decisions[], actions[], sessions[]. Each item: {shouldSave,type,title,content,tags[],confidence,reason}.",
 		"For simple turns return at most 3 total items. For rich discovery return up to 10 total items: at most 2 context, 3 observations, 3 runbooks, 1 decision, 1 action, 1 session.",
@@ -2507,6 +2530,20 @@ function inferDiscoverySubject(finalAnswer: string, snippets: string[]): string 
 	return slugify(title ?? activePack ?? "rich-discovery") || "rich-discovery";
 }
 
+function makeMemoryCandidate(type: NoteType, title: string, content: string, confidence: number, reason: string, tags: string[] = []): MemoryCandidate {
+	return {
+		id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+		type,
+		title: truncate(normalizeNoteTitle(type, title), 120),
+		content: sanitizeEvidence(content),
+		tags: ["autolearn", ...tags].slice(0, 8),
+		confidence,
+		reason,
+		createdAt: nowTimestamp(),
+		pack: activePack,
+	};
+}
+
 function richDiscoveryMemoryCandidates(snippets: string[], richDiscovery: boolean): MemoryCandidate[] {
 	if (!richDiscovery) return [];
 	const finalAnswer = lastAssistantDiscovery(snippets);
@@ -2519,27 +2556,66 @@ function richDiscoveryMemoryCandidates(snippets: string[], richDiscovery: boolea
 	const pathList = paths.length ? `\n\n## Source paths observed\n\n${paths.map((p) => `- \`${p}\``).join("\n")}` : "";
 	const snapshot = [`Sanitized rich discovery snapshot captured automatically from the completed turn.`, pathList, "\n## Final answer snapshot\n", truncate(finalAnswer, 12000)].join("\n");
 	if (sensitivePatternHit(subject, snapshot)) return [];
-	const mk = (type: NoteType, title: string, content: string, confidence: number, reason: string, tags: string[] = []): MemoryCandidate => ({
-		id: `mem-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
-		type,
-		title: truncate(title, 120),
-		content,
-		tags: ["autolearn", "rich-discovery", ...tags].slice(0, 8),
-		confidence,
-		reason,
-		createdAt: timestamp,
-		pack: activePack,
-	});
+	const baseTags = ["rich-discovery", ...(subjectSlug ? [`repo/${subjectSlug}`] : [])];
 	const candidates: MemoryCandidate[] = [
-		mk("session", `Rich discovery: ${subject} ${timestamp}`, snapshot, 0.86, "Preserve full sanitized discovery detail from a rich investigation turn", subjectSlug ? [`repo/${subjectSlug}`] : []),
-		mk("context", subject, `## Rich discovery update (${timestamp})\n\n${truncate(finalAnswer, 9000)}${pathList}`, 0.84, "Update component/repository context with detailed discovered structure and configuration", subjectSlug ? [`repo/${subjectSlug}`] : []),
+		makeMemoryCandidate("session", `Rich discovery: ${subject} ${timestamp}`, snapshot, 0.86, "Preserve full sanitized discovery detail from a rich investigation turn", baseTags),
+		makeMemoryCandidate("context", subject, `## Rich discovery update (${timestamp})\n\n${truncate(finalAnswer, 9000)}${pathList}`, 0.84, "Update component/repository context with detailed discovered structure and configuration", baseTags),
 	];
 	const operational = /\b(deploy|deployment|rollback|tag|image|sync|pipeline|release|kustomi[sz]e|helm|values\.ya?ml|newTag)\b/i.test(finalAnswer);
 	if (operational) {
-		candidates.push(mk("runbook", `${subject} deployment operations`, `## Deployment/runbook details discovered (${timestamp})\n\n${truncate(finalAnswer, 7000)}${pathList}`, 0.83, "Extracted repeatable deploy/configuration procedure from rich discovery", ["deployment-runbook"]));
+		candidates.push(makeMemoryCandidate("runbook", `${subject} deployment operations`, `## Deployment/runbook details discovered (${timestamp})\n\n${truncate(finalAnswer, 7000)}${pathList}`, 0.83, "Extracted repeatable deploy/configuration procedure from rich discovery", ["rich-discovery", "deployment-runbook"]));
 	}
-	candidates.push(mk("observation", `${subject} repository structure and configuration patterns`, `## Structural/configuration observations (${timestamp})\n\n${truncate(finalAnswer, 6500)}${pathList}`, 0.82, "Captured factual repo structure/configuration patterns from rich discovery", subjectSlug ? [`repo/${subjectSlug}`] : []));
+	candidates.push(makeMemoryCandidate("observation", `${subject} repository structure and configuration patterns`, `## Structural/configuration observations (${timestamp})\n\n${truncate(finalAnswer, 6500)}${pathList}`, 0.82, "Captured factual repo structure/configuration patterns from rich discovery", baseTags));
 	return candidates;
+}
+
+function richPersistenceSessionCandidate(snippets: string[], candidates: MemoryCandidate[]): MemoryCandidate | null {
+	const finalAnswer = lastAssistantDiscovery(snippets);
+	if (candidates.length === 0 || finalAnswer.length < 4000) return null;
+	if (candidates.some((candidate) => candidate.type === "session")) return null;
+	const subject = truncate(inferDiscoverySubject(finalAnswer, snippets), 80).replace(/\s+/g, " ").trim() || "rich persistence";
+	const paths = extractMemoryPaths(snippets.join("\n"), 40);
+	const pathList = paths.length ? `\n\n## Source paths observed\n\n${paths.map((p) => `- \`${p}\``).join("\n")}` : "";
+	const content = [`Sanitized rich persistence snapshot captured automatically because durable memories were saved from a detailed completed turn.`, pathList, "\n## Final answer snapshot\n", truncate(finalAnswer, 14000)].join("\n");
+	if (sensitivePatternHit(subject, content)) return null;
+	return makeMemoryCandidate("session", `Rich persistence: ${subject} ${nowTimestamp()}`, content, 0.84, "Preserve detailed source turn for future retrieval", ["rich-persistence", `subject/${slugify(subject)}`]);
+}
+
+function enrichCandidateFromFinalAnswer(candidate: MemoryCandidate, finalAnswer: string): MemoryCandidate {
+	if (!finalAnswer.trim() || candidate.type === "session") return candidate;
+	const minByType: Record<NoteType, number> = {
+		action: 900,
+		context: 1400,
+		observation: 900,
+		runbook: 1400,
+		decision: 900,
+		session: 0,
+	};
+	if (candidate.content.length >= minByType[candidate.type] || finalAnswer.length < 1800) return candidate;
+	const sectionTitle: Record<NoteType, string> = {
+		action: "Detailed deliverable from completed turn",
+		context: "Detailed context from completed turn",
+		observation: "Detailed observations from completed turn",
+		runbook: "Detailed procedure from completed turn",
+		decision: "Detailed decision context from completed turn",
+		session: "Final answer snapshot",
+	};
+	const budget: Record<NoteType, number> = {
+		action: 4500,
+		context: 7500,
+		observation: 5000,
+		runbook: 7500,
+		decision: 4500,
+		session: 0,
+	};
+	const enriched = `${candidate.content.trim()}\n\n## ${sectionTitle[candidate.type]}\n\n${truncate(finalAnswer, budget[candidate.type])}`;
+	return { ...candidate, content: sanitizeEvidence(enriched), reason: `${candidate.reason}; enriched with final-answer detail because persistence should be reusable` };
+}
+
+function enrichPersistenceCandidates(snippets: string[], candidates: MemoryCandidate[]): MemoryCandidate[] {
+	const finalAnswer = lastAssistantDiscovery(snippets);
+	if (candidates.length === 0) return candidates;
+	return candidates.map((candidate) => enrichCandidateFromFinalAnswer(candidate, finalAnswer));
 }
 
 // ---------------------------------------------------------------------------
@@ -4626,7 +4702,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (candidates.length === 0) return;
 
-		const maxProcess = richDiscovery ? 12 : 3;
+		candidates = enrichPersistenceCandidates(snippets, candidates);
+		const richSession = richPersistenceSessionCandidate(snippets, candidates);
+		if (richSession) {
+			const seen = new Set(candidates.map((candidate) => `${candidate.type}:${slugify(candidate.title)}`));
+			const key = `${richSession.type}:${slugify(richSession.title)}`;
+			if (!seen.has(key)) candidates.push(richSession);
+		}
+
+		const maxProcess = (richDiscovery || richSession) ? 12 : 3;
 		let savedCount = 0;
 		let queuedCount = 0;
 		for (const candidate of candidates.slice(0, maxProcess)) {
