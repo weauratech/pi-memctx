@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.3] - 2026-05-02
+
+### Fixed
+
+- Make pack generation include deterministic source inventory and stack signals in repository context notes.
+- Add `/memctx-pack-generate --deep` for opt-in LLM-assisted deep enrichment when a model is selected.
+- Bound repository scans and skip hidden/non-regular files so pack generation/enrichment does not stall on large workspaces or virtualenv-like trees.
+- Move qmd indexing after pack generation to background so generation returns promptly.
+
+
 ## [0.8.2] - 2026-05-02
 
 ### Fixed
