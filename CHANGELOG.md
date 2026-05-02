@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.2] - 2026-05-02
+
+### Fixed
+
+- Make `/memctx-pack-enrich` generate useful deterministic repository context notes even when LLM mode is off.
+- Expand repository detection to infer Java, frontend, SQL/Flyway, Kubernetes/Kustomize, and Terraform evidence from source/config files.
+- Stop gateway enrich from writing retired qmd-economy fact cards as the primary output.
+
+
 ## [0.8.1] - 2026-05-02
 
 ### Fixed

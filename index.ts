@@ -2473,9 +2473,12 @@ function collectRepoEvidence(repoPath: string, name: string): RepoEvidence {
 	const isPlaceholder = nonGitEntries.length === 0;
 	const pkg = collectPackageEvidence(repoPath);
 	const go = collectGoEvidence(repoPath);
-	const hasTerraform = fs.existsSync(path.join(repoPath, "terraform")) || findFilesLimited(repoPath, (rel) => rel.endsWith(".tf"), 3, 3).length > 0;
-	const hasInfra = fs.existsSync(path.join(repoPath, "infra")) || fs.existsSync(path.join(repoPath, "charts")) || fs.existsSync(path.join(repoPath, "helm"));
-	let type = pkg.type || go.type || (hasTerraform || hasInfra ? "IaC" : "unknown");
+	const hasTerraform = fs.existsSync(path.join(repoPath, "terraform")) || findFilesLimited(repoPath, (rel) => rel.endsWith(".tf"), 3, 5).length > 0;
+	const hasInfra = fs.existsSync(path.join(repoPath, "infra")) || fs.existsSync(path.join(repoPath, "charts")) || fs.existsSync(path.join(repoPath, "helm")) || findFilesLimited(repoPath, (rel) => /(^|\/)(kustomization\.ya?ml|Chart\.yaml|values\.ya?ml)$/.test(rel), 3, 6).length > 0;
+	const hasJava = findFilesLimited(repoPath, (rel) => /\.java$|(^|\/)(pom\.xml|build\.gradle|gradlew)$/.test(rel), 3, 7).length > 0;
+	const hasFrontend = findFilesLimited(repoPath, (rel) => /\.(tsx|jsx)$|(^|\/)(next\.config\.[cm]?[jt]s|vite\.config\.[jt]s)$/.test(rel), 3, 7).length > 0;
+	const hasSql = findFilesLimited(repoPath, (rel) => /\.(sql)$|(^|\/)flyway\//i.test(rel), 3, 7).length > 0;
+	let type = pkg.type || go.type || (hasJava ? "Java" : hasFrontend ? "Frontend" : hasTerraform || hasInfra ? "IaC" : hasSql ? "Database" : "unknown");
 	if (name === ".github") type = "GitHub profile/docs";
 
 	const docs: EvidenceFile[] = [];
@@ -2517,6 +2520,9 @@ function collectRepoEvidence(repoPath: string, name: string): RepoEvidence {
 		...go.observations,
 		workflows.length ? `GitHub Actions workflows observed: ${workflows.map((w) => w.path).join(", ")}` : "",
 		infra.length ? `Infrastructure/config files observed: ${infra.slice(0, 8).join(", ")}` : "",
+		hasJava ? "Java source files observed." : "",
+		hasFrontend ? "Frontend TSX/JSX source files observed." : "",
+		hasSql ? "SQL/Flyway database migration files observed." : "",
 		isPlaceholder ? "Repository appears to be empty/placeholder; only Git metadata or no source files observed." : "",
 	].filter(Boolean)));
 
@@ -2593,8 +2599,12 @@ function detectLanguage(rel: string): string {
 	if ([".js", ".jsx", ".mjs", ".cjs"].includes(ext)) return "javascript";
 	if (ext === ".go") return "go";
 	if (ext === ".py") return "python";
+	if (ext === ".java") return "java";
+	if (ext === ".sql") return "sql";
 	if ([".yml", ".yaml"].includes(ext)) return "yaml";
 	if (ext === ".json") return "json";
+	if (ext === ".xml") return "xml";
+	if (ext === ".properties") return "properties";
 	if (ext === ".md") return "markdown";
 	if (ext === ".tf") return "terraform";
 	return ext.replace(/^\./, "") || "text";
@@ -2603,8 +2613,8 @@ function detectLanguage(rel: string): string {
 function collectRepoFileInventory(repoPath: string, limit = 180): RepoFileInventoryItem[] {
 	const candidates = findFilesLimited(repoPath, (rel, name) => {
 		if (rel.includes("/node_modules/") || SENSITIVE_FILE_RE.test(rel)) return false;
-		return /\.(ts|tsx|js|jsx|mjs|cjs|go|py|json|ya?ml|md|tf|dockerfile)$/i.test(name)
-			|| ["Dockerfile", "Makefile", "package.json", "go.mod", "compose.yml", "docker-compose.yml"].includes(name);
+		return /\.(ts|tsx|js|jsx|mjs|cjs|go|py|java|sql|json|ya?ml|md|tf|xml|properties|gradle|dockerfile)$/i.test(name)
+			|| ["Dockerfile", "Makefile", "package.json", "go.mod", "pom.xml", "gradlew", "compose.yml", "docker-compose.yml", "kustomization.yaml", "Chart.yaml"].includes(name);
 	}, limit, 7);
 	return candidates.map((full) => {
 		const rel = path.relative(repoPath, full);
@@ -2613,9 +2623,12 @@ function collectRepoFileInventory(repoPath: string, limit = 180): RepoFileInvent
 			path: rel,
 			size: Buffer.byteLength(content, "utf-8"),
 			language: detectLanguage(rel),
-			imports: [...content.matchAll(/^\s*import\s+.*?from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]).slice(0, 12),
+			imports: [
+				...[...content.matchAll(/^\s*import\s+.*?from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]),
+				...[...content.matchAll(/^\s*import\s+([a-zA-Z0-9_.]+);/gm)].map((m) => m[1]),
+			].slice(0, 12),
 			exports: [...content.matchAll(/^\s*export\s+(?:default\s+)?(?:class|function|const|interface|type)\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]).slice(0, 20),
-			symbols: [...content.matchAll(/^\s*(?:class|function|const|interface|type|func)\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]).slice(0, 20),
+			symbols: [...content.matchAll(/^\s*(?:public\s+|private\s+|protected\s+)?(?:class|interface|enum|record|function|const|type|func)\s+([A-Za-z0-9_]+)/gm)].map((m) => m[1]).slice(0, 20),
 		};
 	}).sort((a, b) => {
 		const rank = (item: RepoFileInventoryItem) => /(^|\/)(package\.json|go\.mod|README\.md|AGENTS\.md|CLAUDE\.md|Dockerfile|docker-compose\.ya?ml)$/.test(item.path) ? 0 : item.path.split("/").length;
@@ -2762,13 +2775,17 @@ ${testing.map((x) => `- ${x}`).join("\n") || "- Inspect repository tests and CI 
 async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, packPath: string, ctx: ExtensionContext): Promise<string[]> {
 	const filesCreated: string[] = [];
 	const today = todayStr();
-	const repos = discoverRepositories(scanDir).filter((repo) => repo.status === "active").slice(0, 12);
+	const repos = discoverRepositories(scanDir).filter((repo) => repo.status === "active").slice(0, 20);
 	const contextRows: string[] = [];
 	if (ctx.hasUI) ctx.ui.notify(`memctx enrich: discovered ${repos.length} active repos.`, "info");
 	for (const repo of repos) {
 		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: collecting inventory...`, "info");
 		const inventory = collectRepoFileInventory(repo.path);
 		const selected = await selectImportantFilesWithLlm(repo, inventory, ctx);
+		const contextRel = `20-context/${repo.slug}.md`;
+		writeGeneratedFile(packPath, contextRel, repoContextNote(packSlug, repo, today, inventory, selected), filesCreated);
+		contextRows.push(`| [[packs/${packSlug}/20-context/${repo.slug}|${repo.name}]] | ${repo.type}; ${repo.description || "repository context"}. |`);
+		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: wrote deterministic context (${inventory.length} files indexed).`, "info");
 		if (llmMode === "off" || !ctx.model) {
 			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: LLM architecture skipped (llm:${llmMode}).`, "info");
 			continue;
@@ -2788,17 +2805,35 @@ async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, pac
 		const indexPath = path.join(packPath, "00-system/indexes/context-index.md");
 		const existing = readFileSafe(indexPath);
 		if (existing) {
-			fs.writeFileSync(indexPath, `${existing.trim()}\n${contextRows.join("\n")}\n`, "utf-8");
-			filesCreated.push(indexPath);
+			const newRows = contextRows.filter((row) => !existing.includes(row));
+			if (newRows.length > 0) {
+				fs.writeFileSync(indexPath, `${existing.trim()}\n${newRows.join("\n")}\n`, "utf-8");
+				filesCreated.push(indexPath);
+			}
 		}
 	}
-	await enrichQmdEconomyFactCardsWithQmd(packSlug, packPath, filesCreated, (message) => {
-		if (ctx.hasUI) ctx.ui.notify(message, "info");
-	});
 	return filesCreated;
 }
 
-function repoContextNote(packSlug: string, repo: RepoEvidence, today: string): string {
+function repoInventorySummary(inventory: RepoFileInventoryItem[], selected: string[]): string {
+	if (inventory.length === 0) return "No source/config files were indexed for this repository.";
+	const byLanguage = new Map<string, number>();
+	for (const item of inventory) byLanguage.set(item.language, (byLanguage.get(item.language) ?? 0) + 1);
+	const languages = [...byLanguage.entries()].sort((a, b) => b[1] - a[1]).map(([lang, count]) => `${lang}: ${count}`).join(", ");
+	const important = inventory
+		.filter((item) => selected.includes(item.path) || /(^|\/)(package\.json|pom\.xml|go\.mod|README\.md|Dockerfile|Makefile|kustomization\.ya?ml|Chart\.yaml)$/.test(item.path) || item.symbols.length > 0 || item.imports.length > 0)
+		.slice(0, 24);
+	return [
+		`Indexed files: ${inventory.length}`,
+		`Languages/config detected: ${languages}`,
+		"",
+		"| File | Language | Signals |",
+		"|---|---|---|",
+		...important.map((item) => `| \`${item.path}\` | ${item.language} | ${[...item.symbols.slice(0, 4), ...item.imports.slice(0, 3).map((i) => `imports ${i}`)].join(", ") || `${item.size} bytes`} |`),
+	].join("\n");
+}
+
+function repoContextNote(packSlug: string, repo: RepoEvidence, today: string, inventory: RepoFileInventoryItem[] = [], selected: string[] = []): string {
 	const docs = repo.docs.slice(0, 8).map((d) => `### ${d.path}\n\n${d.content}`).join("\n\n");
 	const scripts = Object.keys(repo.scripts).length
 		? Object.entries(repo.scripts).map(([name, cmd]) => `| ${name} | \`${sanitizeEvidence(cmd)}\` |`).join("\n")
@@ -2856,6 +2891,10 @@ ${workflows}
 \`\`\`txt
 ${repo.tree.join("\n") || "<empty>"}
 \`\`\`
+
+## Source inventory
+
+${repoInventorySummary(inventory, selected)}
 
 ## Source excerpts
 
