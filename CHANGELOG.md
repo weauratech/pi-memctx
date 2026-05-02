@@ -7,6 +7,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.7.0] - 2026-05-02
+
+### Added
+
+- Added the Memory Gateway runtime with `gateway-lite`, `gateway`, and `gateway-full` profiles.
+- Added cheap semantic candidate ranking and local memory summaries for compact, high-signal context injection.
+- Added `npx pi-memctx doctor` and improved qmd binary resolution.
+
+### Changed
+
+- Reworked the default experience around gateway-based memory evaluation instead of direct answer-plan injection.
+- Updated benchmark tooling and documentation for baseline, gateway-lite, and gateway-full comparisons.
+- Rewrote the README for the new open-source Memory Gateway architecture and latest benchmark results.
+
+
 ## [0.6.1] - 2026-05-01
 
 ### Changed
