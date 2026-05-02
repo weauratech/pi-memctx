@@ -201,6 +201,7 @@ let contextPipeline: ContextPipeline = parseContextPipeline(process.env.MEMCTX_C
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
 let lastGatewayDecision: GatewayDecisionStatus | null = null;
+let packEnrichRunning = false;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
 let llmMode: LlmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 let retrievalPolicy: RetrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
@@ -3790,10 +3791,14 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-pack-enrich command: enrich existing pack with LLM/qmd notes ---
 	pi.registerCommand("memctx-pack-enrich", {
-		description: "Run qmd/LLM-assisted enrichment for the active pack. Usage: /memctx-pack-enrich [source-dir]",
+		description: "Run qmd/LLM-assisted enrichment for the active pack in the background. Usage: /memctx-pack-enrich [source-dir]",
 		handler: async (args, ctx) => {
 			if (!activePackPath || !activePack) {
 				ctx.ui.notify("memctx: No active pack to enrich.", "error");
+				return;
+			}
+			if (packEnrichRunning) {
+				ctx.ui.notify("memctx enrich: already running in the background. Wait for completion before starting another enrich.", "warning");
 				return;
 			}
 			let scanDir = (args ?? "").trim();
@@ -3805,18 +3810,25 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir]", "error");
 				return;
 			}
+			const pack = activePack;
+			const packPath = activePackPath;
+			const collection = qmdCollection;
 			const started = Date.now();
-			ctx.ui.notify(`memctx enrich: starting for pack ${activePack}\nsource: ${scanDir}\nqmd: ${qmdAvailable ? "available" : "unavailable"}\nllm: ${llmMode}${llmMode === "off" || !ctx.model ? " (architecture synthesis skipped; fact cards still run)" : ""}`, "info");
-			ctx.ui.setStatus("memctx", `📦 ${activePack} · enriching...`);
-			try {
-				const files = await enrichGeneratedPackWithLlm(scanDir, activePack, activePackPath, ctx);
-				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-				ctx.ui.notify(`memctx enrich: complete in ${Date.now() - started}ms\nupdated files: ${files.length}\n${files.map((f) => `- ${path.relative(activePackPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}`, "info");
-			} catch (err) {
-				ctx.ui.notify(`memctx enrich: failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`, "error");
-			} finally {
-				ctx.ui.setStatus("memctx", buildStatusText());
-			}
+			packEnrichRunning = true;
+			ctx.ui.notify(`memctx enrich: started in background for pack ${pack}\nsource: ${scanDir}\nqmd: ${qmdAvailable ? "available" : "unavailable"}\nllm: ${llmMode}${llmMode === "off" || !ctx.model ? " (architecture synthesis skipped; fact cards still run)" : ""}`, "info");
+			ctx.ui.setStatus("memctx", `📦 ${pack} · enriching in background`);
+			void (async () => {
+				try {
+					const files = await enrichGeneratedPackWithLlm(scanDir, pack, packPath, ctx);
+					if (qmdAvailable && collection) qmdEmbed(collection, packPath).catch(() => {});
+					ctx.ui.notify(`memctx enrich: complete in ${Date.now() - started}ms\nupdated files: ${files.length}\n${files.map((f) => `- ${path.relative(packPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}`, "info");
+				} catch (err) {
+					ctx.ui.notify(`memctx enrich: failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`, "error");
+				} finally {
+					packEnrichRunning = false;
+					ctx.ui.setStatus("memctx", buildStatusText());
+				}
+			})();
 		},
 	});
 
