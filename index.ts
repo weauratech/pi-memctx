@@ -300,9 +300,15 @@ function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfi
 function normalizeProfileName(value: unknown): MemctxProfile {
 	const name = String(value ?? "gateway").toLowerCase();
 	if (["gateway-lite", "gateway", "gateway-full", "custom"].includes(name)) return name as MemctxProfile;
-	// Retired profile compatibility: all old modes now route through the gateway runtime.
-	if (["low", "balanced", "auto", "full", "qmd-economy"].includes(name)) return "gateway";
+	// Retired profile compatibility: old modes route to the closest gateway profile.
+	if (["low", "qmd-economy"].includes(name)) return "gateway-lite";
+	if (["full"].includes(name)) return "gateway-full";
+	if (["balanced", "auto"].includes(name)) return "gateway";
 	return "gateway";
+}
+
+function isRetiredProfileName(value: unknown): boolean {
+	return ["low", "balanced", "auto", "full", "qmd-economy"].includes(String(value ?? "").toLowerCase());
 }
 
 function readMemctxConfig(): MemctxConfig {
@@ -313,6 +319,9 @@ function readMemctxConfig(): MemctxConfig {
 		const parsed = JSON.parse(raw) as Partial<MemctxConfig>;
 		const profile = normalizeProfileName(parsed.profile);
 		const base = (profile === "custom" ? normalizeProfileName(parsed.baseProfile) : profile) as Exclude<MemctxProfile, "custom">;
+		if (isRetiredProfileName(parsed.profile)) {
+			return profileDefaults(base);
+		}
 		return { ...profileDefaults(base), ...parsed, profile, baseProfile: base };
 	} catch {
 		return fallback;

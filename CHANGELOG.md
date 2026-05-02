@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.7.2] - 2026-05-02
+
+### Fixed
+
+- Migrate retired persisted profiles such as `qmd-economy`, `low`, `balanced`, `auto`, and `full` to the closest gateway profile so the status overlay no longer reports stale `ctx:qmd-economy` after upgrading.
+
+
 ## [0.7.1] - 2026-05-02
 
 ### Fixed
