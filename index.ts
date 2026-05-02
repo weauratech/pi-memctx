@@ -398,6 +398,8 @@ function safeJsonParse<T>(text: string): T | null {
 
 export function readFileSafe(filePath: string): string | null {
 	try {
+		const stat = fs.statSync(filePath);
+		if (!stat.isFile() || stat.size > 1_500_000) return null;
 		return fs.readFileSync(filePath, "utf-8");
 	} catch {
 		return null;
@@ -755,8 +757,9 @@ async function completeJsonWithLlm<T>(
 	useCase: string,
 	systemPrompt: string,
 	payload: unknown,
+	force = false,
 ): Promise<T | null> {
-	if (llmMode === "off" || !ctx.model) return null;
+	if ((!force && llmMode === "off") || !ctx.model) return null;
 	return completeJsonWithModel<T>(ctx, useCase, systemPrompt, payload);
 }
 
@@ -2341,10 +2344,11 @@ function listTopLevelEntries(dirPath: string, limit = 60): string[] {
 	}
 }
 
-function findFilesLimited(root: string, predicate: (rel: string, name: string) => boolean, limit = 20, maxDepth = 4): string[] {
+function findFilesLimited(root: string, predicate: (rel: string, name: string) => boolean, limit = 20, maxDepth = 4, maxEntries = 700): string[] {
 	const found: string[] = [];
+	let visited = 0;
 	function walk(dir: string, depth: number) {
-		if (found.length >= limit || depth > maxDepth) return;
+		if (found.length >= limit || depth > maxDepth || visited >= maxEntries) return;
 		let entries: fs.Dirent[];
 		try {
 			entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -2352,20 +2356,25 @@ function findFilesLimited(root: string, predicate: (rel: string, name: string) =
 			return;
 		}
 		for (const entry of entries) {
-			if (found.length >= limit) break;
-			if (SKIP_DIRS.has(entry.name)) continue;
+			if (found.length >= limit || visited >= maxEntries) break;
+			visited++;
+			if (SKIP_DIRS.has(entry.name) || (entry.name.startsWith(".") && !REPO_HIDDEN_ALLOWLIST.has(entry.name))) continue;
 			const full = path.join(dir, entry.name);
 			const rel = path.relative(root, full);
 			if (SENSITIVE_FILE_RE.test(rel)) continue;
 			if (entry.isDirectory()) {
 				walk(full, depth + 1);
-			} else if (predicate(rel, entry.name)) {
+			} else if (entry.isFile() && predicate(rel, entry.name)) {
 				found.push(full);
 			}
 		}
 	}
 	walk(root, 0);
 	return found.sort();
+}
+
+function yieldToUi(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 function repoSlugForName(name: string): string {
@@ -2473,11 +2482,13 @@ function collectRepoEvidence(repoPath: string, name: string): RepoEvidence {
 	const isPlaceholder = nonGitEntries.length === 0;
 	const pkg = collectPackageEvidence(repoPath);
 	const go = collectGoEvidence(repoPath);
-	const hasTerraform = fs.existsSync(path.join(repoPath, "terraform")) || findFilesLimited(repoPath, (rel) => rel.endsWith(".tf"), 3, 5).length > 0;
-	const hasInfra = fs.existsSync(path.join(repoPath, "infra")) || fs.existsSync(path.join(repoPath, "charts")) || fs.existsSync(path.join(repoPath, "helm")) || findFilesLimited(repoPath, (rel) => /(^|\/)(kustomization\.ya?ml|Chart\.yaml|values\.ya?ml)$/.test(rel), 3, 6).length > 0;
-	const hasJava = findFilesLimited(repoPath, (rel) => /\.java$|(^|\/)(pom\.xml|build\.gradle|gradlew)$/.test(rel), 3, 7).length > 0;
-	const hasFrontend = findFilesLimited(repoPath, (rel) => /\.(tsx|jsx)$|(^|\/)(next\.config\.[cm]?[jt]s|vite\.config\.[jt]s)$/.test(rel), 3, 7).length > 0;
-	const hasSql = findFilesLimited(repoPath, (rel) => /\.(sql)$|(^|\/)flyway\//i.test(rel), 3, 7).length > 0;
+	const signalFiles = findFilesLimited(repoPath, (rel) => /\.java$|\.tsx$|\.jsx$|\.sql$|\.tf$|(^|\/)(pom\.xml|build\.gradle|gradlew|next\.config\.[cm]?[jt]s|vite\.config\.[jt]s|kustomization\.ya?ml|Chart\.yaml|values\.ya?ml)$|(^|\/)flyway\//i.test(rel), 80, 7, 900)
+		.map((file) => path.relative(repoPath, file));
+	const hasTerraform = fs.existsSync(path.join(repoPath, "terraform")) || signalFiles.some((rel) => rel.endsWith(".tf"));
+	const hasInfra = fs.existsSync(path.join(repoPath, "infra")) || fs.existsSync(path.join(repoPath, "charts")) || fs.existsSync(path.join(repoPath, "helm")) || signalFiles.some((rel) => /(^|\/)(kustomization\.ya?ml|Chart\.yaml|values\.ya?ml)$/.test(rel));
+	const hasJava = signalFiles.some((rel) => /\.java$|(^|\/)(pom\.xml|build\.gradle|gradlew)$/.test(rel));
+	const hasFrontend = signalFiles.some((rel) => /\.(tsx|jsx)$|(^|\/)(next\.config\.[cm]?[jt]s|vite\.config\.[jt]s)$/.test(rel));
+	const hasSql = signalFiles.some((rel) => /\.(sql)$|(^|\/)flyway\//i.test(rel));
 	let type = pkg.type || go.type || (hasJava ? "Java" : hasFrontend ? "Frontend" : hasTerraform || hasInfra ? "IaC" : hasSql ? "Database" : "unknown");
 	if (name === ".github") type = "GitHub profile/docs";
 
@@ -2520,6 +2531,7 @@ function collectRepoEvidence(repoPath: string, name: string): RepoEvidence {
 		...go.observations,
 		workflows.length ? `GitHub Actions workflows observed: ${workflows.map((w) => w.path).join(", ")}` : "",
 		infra.length ? `Infrastructure/config files observed: ${infra.slice(0, 8).join(", ")}` : "",
+		signalFiles.length ? `Source/config signals observed: ${signalFiles.slice(0, 10).join(", ")}` : "",
 		hasJava ? "Java source files observed." : "",
 		hasFrontend ? "Frontend TSX/JSX source files observed." : "",
 		hasSql ? "SQL/Flyway database migration files observed." : "",
@@ -2615,7 +2627,7 @@ function collectRepoFileInventory(repoPath: string, limit = 180): RepoFileInvent
 		if (rel.includes("/node_modules/") || SENSITIVE_FILE_RE.test(rel)) return false;
 		return /\.(ts|tsx|js|jsx|mjs|cjs|go|py|java|sql|json|ya?ml|md|tf|xml|properties|gradle|dockerfile)$/i.test(name)
 			|| ["Dockerfile", "Makefile", "package.json", "go.mod", "pom.xml", "gradlew", "compose.yml", "docker-compose.yml", "kustomization.yaml", "Chart.yaml"].includes(name);
-	}, limit, 7);
+	}, limit, 7, 900);
 	return candidates.map((full) => {
 		const rel = path.relative(repoPath, full);
 		const content = readFileSafe(full) ?? "";
@@ -2647,9 +2659,9 @@ function extractImportantSnippet(repoPath: string, rel: string, maxChars = 5000)
 	return truncate(important.join("\n"), maxChars);
 }
 
-async function selectImportantFilesWithLlm(repo: RepoEvidence, inventory: RepoFileInventoryItem[], ctx: ExtensionContext): Promise<string[]> {
+async function selectImportantFilesWithLlm(repo: RepoEvidence, inventory: RepoFileInventoryItem[], ctx: ExtensionContext, forceLlm = false): Promise<string[]> {
 	const fallback = inventory.slice(0, 24).map((f) => f.path);
-	if (llmMode === "off" || !ctx.model || inventory.length === 0) return fallback;
+	if ((!forceLlm && llmMode === "off") || !ctx.model || inventory.length === 0) return fallback;
 	const decision = await completeJsonWithLlm<LlmFileSelection>(ctx, "pack-generate-select-files", [
 		"Select the most important files for understanding a repository.",
 		"Prioritize architecture, entrypoints, API surface, data model, integrations, config, deployment, tests.",
@@ -2657,13 +2669,13 @@ async function selectImportantFilesWithLlm(repo: RepoEvidence, inventory: RepoFi
 	].join("\n"), {
 		repo: { name: repo.name, type: repo.type, scripts: repo.scripts, tree: repo.tree.slice(0, 80) },
 		inventory: inventory.slice(0, 160),
-	});
+	}, forceLlm);
 	const selected = (decision?.files ?? []).filter((f) => inventory.some((i) => i.path === f)).slice(0, 24);
 	return selected.length ? selected : fallback;
 }
 
-async function synthesizeRepoWithLlm(repo: RepoEvidence, selectedFiles: string[], ctx: ExtensionContext): Promise<LlmRepoSynthesis | null> {
-	if (llmMode === "off" || !ctx.model) return null;
+async function synthesizeRepoWithLlm(repo: RepoEvidence, selectedFiles: string[], ctx: ExtensionContext, forceLlm = false): Promise<LlmRepoSynthesis | null> {
+	if ((!forceLlm && llmMode === "off") || !ctx.model) return null;
 	const snippets = selectedFiles.map((file) => ({ file, snippet: extractImportantSnippet(repo.path, file, 3500) })).filter((f) => f.snippet.trim());
 	if (snippets.length === 0) return null;
 	return completeJsonWithLlm<LlmRepoSynthesis>(ctx, "pack-generate-synthesize-repo", [
@@ -2674,7 +2686,7 @@ async function synthesizeRepoWithLlm(repo: RepoEvidence, selectedFiles: string[]
 	].join("\n"), {
 		repo: { name: repo.name, type: repo.type, path: repo.path, scripts: repo.scripts, safeCommands: repo.safeCommands },
 		files: snippets,
-	});
+	}, forceLlm);
 }
 
 function asStringArray(value: unknown): string[] {
@@ -2772,26 +2784,28 @@ ${testing.map((x) => `- ${x}`).join("\n") || "- Inspect repository tests and CI 
 `;
 }
 
-async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, packPath: string, ctx: ExtensionContext): Promise<string[]> {
+async function enrichGeneratedPackWithLlm(scanDir: string, packSlug: string, packPath: string, ctx: ExtensionContext, forceLlm = false): Promise<string[]> {
 	const filesCreated: string[] = [];
 	const today = todayStr();
 	const repos = discoverRepositories(scanDir).filter((repo) => repo.status === "active").slice(0, 20);
 	const contextRows: string[] = [];
 	if (ctx.hasUI) ctx.ui.notify(`memctx enrich: discovered ${repos.length} active repos.`, "info");
 	for (const repo of repos) {
+		await yieldToUi();
 		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: collecting inventory...`, "info");
 		const inventory = collectRepoFileInventory(repo.path);
-		const selected = await selectImportantFilesWithLlm(repo, inventory, ctx);
+		await yieldToUi();
+		const selected = await selectImportantFilesWithLlm(repo, inventory, ctx, forceLlm);
 		const contextRel = `20-context/${repo.slug}.md`;
 		writeGeneratedFile(packPath, contextRel, repoContextNote(packSlug, repo, today, inventory, selected), filesCreated);
 		contextRows.push(`| [[packs/${packSlug}/20-context/${repo.slug}|${repo.name}]] | ${repo.type}; ${repo.description || "repository context"}. |`);
 		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: wrote deterministic context (${inventory.length} files indexed).`, "info");
-		if (llmMode === "off" || !ctx.model) {
-			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: LLM architecture skipped (llm:${llmMode}).`, "info");
+		if ((!forceLlm && llmMode === "off") || !ctx.model) {
+			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: LLM architecture skipped (${ctx.model ? `llm:${llmMode}` : "no model"}).`, "info");
 			continue;
 		}
 		if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: synthesizing architecture from ${selected.length} files...`, "info");
-		const synthesis = await synthesizeRepoWithLlm(repo, selected, ctx);
+		const synthesis = await synthesizeRepoWithLlm(repo, selected, ctx, forceLlm);
 		if (!synthesis) {
 			if (ctx.hasUI) ctx.ui.notify(`memctx enrich: repo ${repo.name}: no LLM synthesis produced.`, "warning");
 			continue;
@@ -3150,7 +3164,9 @@ ${repos.map((r) => `- [[packs/${packSlug}/20-context/${r.slug}|${r.name}]] — $
 	contextEntries.push(`| [[packs/${packSlug}/20-context/overview|${title} Overview]] | Workspace overview generated from ${scanDir}. |`);
 
 	for (const repo of repos) {
-		writeGeneratedFile(packPath, `20-context/${repo.slug}.md`, repoContextNote(packSlug, repo, today), filesCreated);
+		const inventory = collectRepoFileInventory(repo.path);
+		const selected = inventory.slice(0, 24).map((item) => item.path);
+		writeGeneratedFile(packPath, `20-context/${repo.slug}.md`, repoContextNote(packSlug, repo, today, inventory, selected), filesCreated);
 		writeGeneratedFile(packPath, `30-projects/${repo.slug}.md`, repoProjectNote(packSlug, repo, today), filesCreated);
 		contextEntries.push(`| [[packs/${packSlug}/20-context/${repo.slug}|${repo.name}]] | ${repo.type} — ${repo.description.slice(0, 80)} |`);
 		projectEntries.push(`| [[packs/${packSlug}/30-projects/${repo.slug}|${repo.name}]] | ${repo.status} ${repo.type} repository. |`);
@@ -3196,8 +3212,6 @@ ${repos.map((r) => `| ${r.name} | ${r.type} | ${r.status} | ${r.observations.sli
 		["runbook-index.md", "Runbook Index", runbookEntries.length ? runbookEntries : ["| <Add wikilink> | <Purpose> |"]],
 		["session-index.md", "Session Index", ["| <Add wikilink> | <Purpose> |"]],
 	];
-	generateQmdEconomyFactCards(packSlug, packPath, filesCreated);
-
 	for (const [filename, heading, rows] of indexSpecs) {
 		writeGeneratedFile(packPath, `00-system/indexes/${filename}`, `---
 type: index
@@ -3970,7 +3984,9 @@ export default function (pi: ExtensionAPI) {
 				fs.mkdirSync(packsDir, { recursive: true });
 			}
 
-			const parts = (args ?? "").trim().split(/\s+/);
+			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const deep = rawParts.includes("--deep") || rawParts.includes("deep");
+			const parts = rawParts.filter((part) => part !== "--deep" && part !== "deep");
 			let scanDir = parts[0] || ctx.cwd;
 			let slug = parts[1] || "";
 
@@ -4002,18 +4018,20 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`memctx: Scanning ${scanDir}...`, "info");
 
 			const { packPath, filesCreated } = generatePackFromDirectory(scanDir, slug, packsDir);
-			if (llmMode !== "off" && ctx.model) {
-				ctx.ui.notify(`memctx: Running LLM-assisted deep pack enrichment for "${slug}"...`, "info");
-				const enriched = await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx);
+			if ((deep || llmMode !== "off") && ctx.model) {
+				ctx.ui.notify(`memctx: Running ${deep ? "deep " : ""}LLM-assisted pack enrichment for "${slug}"...`, "info");
+				const enriched = await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx, deep);
 				filesCreated.push(...enriched);
+			} else if (deep && !ctx.model) {
+				ctx.ui.notify("memctx: Deep enrichment requested, but no model is selected. Deterministic pack was still generated.", "warning");
 			} else if (llmMode !== "off" && !ctx.model) {
 				ctx.ui.notify("memctx: LLM enrichment skipped because no model is selected.", "warning");
 			}
 
-			// Index with qmd if available
+			// Index with qmd in the background if available; do not block Pi after generation.
 			if (qmdAvailable) {
 				const collection = `memctx-${slug}`;
-				await qmdEmbed(collection, packPath);
+				qmdEmbed(collection, packPath).catch(() => {});
 			}
 
 			ctx.ui.notify(
