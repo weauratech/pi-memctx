@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.5] - 2026-05-02
+
+### Fixed
+
+- Remove deprecated transitive install dependency chains so `pi install npm:pi-memctx` no longer emits npm deprecation warnings from bundled dependencies.
+- Resolve `@mariozechner/pi-ai` dynamically from the host Pi installation only when LLM-powered features are used.
+- Keep qmd support optional through `QMD_PATH`, local/vendor binaries, or `PATH`, with grep fallback when qmd is unavailable.
+
+
 ## [0.8.4] - 2026-05-02
 
 ### Fixed
