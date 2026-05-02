@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.4] - 2026-05-02
+
+### Fixed
+
+- Start LLM deep enrichment in the background by default during `/memctx-pack-generate` when a model is selected, with `--no-deep` available to skip it.
+- Keep `/memctx-pack-enrich` responsive by deferring the deep job and continuing qmd indexing in the background.
+
+
 ## [0.8.3] - 2026-05-02
 
 ### Fixed

@@ -89,7 +89,7 @@ Generated notes are context, not authority. Source-of-truth repository files, te
 
 Use `/memctx-pack-enrich [source-dir]` to rerun deterministic repository inventory and optional LLM-assisted enrichment for the active pack without regenerating the entire pack. The command runs in the background so the Pi terminal remains responsive. If `source-dir` is omitted, pi-memctx tries the source directory recorded in the pack resource map.
 
-Use `/memctx-pack-generate --deep` to opt into LLM-assisted deep enrichment during pack generation when a model is selected. Without `--deep`, generation still writes deterministic repository context, source inventory, stack signals, and safe source-of-truth pointers.
+When a model is selected, `/memctx-pack-generate` starts LLM-assisted deep enrichment in the background by default after writing the deterministic pack. Use `/memctx-pack-generate --no-deep` to skip LLM enrichment. Generation always writes deterministic repository context, source inventory, stack signals, and safe source-of-truth pointers first.
 
 ## Current limitations
 

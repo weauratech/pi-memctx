@@ -3844,7 +3844,7 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-pack-enrich command: enrich existing pack with LLM/qmd notes ---
 	pi.registerCommand("memctx-pack-enrich", {
-		description: "Run qmd/LLM-assisted enrichment for the active pack in the background. Usage: /memctx-pack-enrich [source-dir]",
+		description: "Deep-enrich the active pack in the background. Usage: /memctx-pack-enrich [source-dir] [--no-deep]",
 		handler: async (args, ctx) => {
 			if (!activePackPath || !activePack) {
 				ctx.ui.notify("memctx: No active pack to enrich.", "error");
@@ -3854,25 +3854,28 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("memctx enrich: already running in the background. Wait for completion before starting another enrich.", "warning");
 				return;
 			}
-			let scanDir = (args ?? "").trim();
+			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const noDeep = rawParts.includes("--no-deep");
+			let scanDir = rawParts.filter((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep")[0] ?? "";
 			if (!scanDir) {
 				const resource = readFileSafe(path.join(activePackPath, "00-system", "pi-agent", "resource-map.md")) ?? "";
 				scanDir = resource.match(/## Source directory\s*\n\s*`([^`]+)`/m)?.[1] ?? "";
 			}
 			if (!scanDir || !fs.existsSync(scanDir)) {
-				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir]", "error");
+				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir] [--no-deep]", "error");
 				return;
 			}
 			const pack = activePack;
 			const packPath = activePackPath;
 			const collection = qmdCollection;
 			const started = Date.now();
+			const useLlm = !noDeep && !!ctx.model;
 			packEnrichRunning = true;
-			ctx.ui.notify(`memctx enrich: started in background for pack ${pack}\nsource: ${scanDir}\nqmd: ${qmdAvailable ? "available" : "unavailable"}\nllm: ${llmMode}${llmMode === "off" || !ctx.model ? " (architecture synthesis skipped; fact cards still run)" : ""}`, "info");
+			ctx.ui.notify(`memctx enrich: started in background for pack ${pack}\nsource: ${scanDir}\ndeep LLM: ${useLlm ? "on" : "off"}\nqmd indexing: ${qmdAvailable ? "background" : "unavailable"}`, "info");
 			ctx.ui.setStatus("memctx", `📦 ${pack} · enriching in background`);
-			void (async () => {
+			setTimeout(() => void (async () => {
 				try {
-					const files = await enrichGeneratedPackWithLlm(scanDir, pack, packPath, ctx);
+					const files = await enrichGeneratedPackWithLlm(scanDir, pack, packPath, ctx, useLlm);
 					if (qmdAvailable && collection) qmdEmbed(collection, packPath).catch(() => {});
 					ctx.ui.notify(`memctx enrich: complete in ${Date.now() - started}ms\nupdated files: ${files.length}\n${files.map((f) => `- ${path.relative(packPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}`, "info");
 				} catch (err) {
@@ -3881,7 +3884,7 @@ export default function (pi: ExtensionAPI) {
 					packEnrichRunning = false;
 					ctx.ui.setStatus("memctx", buildStatusText());
 				}
-			})();
+			})(), 0);
 		},
 	});
 
@@ -3969,7 +3972,7 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-pack-generate command: generate a pack from a directory ---
 	const packGenerateCommand = {
-		description: "Generate a memory pack from a directory of repos. Usage: /memctx-pack-generate [path] [slug]",
+		description: "Generate a memory pack from a directory of repos. Usage: /memctx-pack-generate [path] [slug] [--no-deep]",
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			// Resolve packs directory — create default if none exists
 			let packsDir = _packsDir;
@@ -3985,8 +3988,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
-			const deep = rawParts.includes("--deep") || rawParts.includes("deep");
-			const parts = rawParts.filter((part) => part !== "--deep" && part !== "deep");
+			const noDeep = rawParts.includes("--no-deep");
+			const parts = rawParts.filter((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep");
 			let scanDir = parts[0] || ctx.cwd;
 			let slug = parts[1] || "";
 
@@ -4018,35 +4021,42 @@ export default function (pi: ExtensionAPI) {
 			ctx.ui.notify(`memctx: Scanning ${scanDir}...`, "info");
 
 			const { packPath, filesCreated } = generatePackFromDirectory(scanDir, slug, packsDir);
-			if ((deep || llmMode !== "off") && ctx.model) {
-				ctx.ui.notify(`memctx: Running ${deep ? "deep " : ""}LLM-assisted pack enrichment for "${slug}"...`, "info");
-				const enriched = await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx, deep);
-				filesCreated.push(...enriched);
-			} else if (deep && !ctx.model) {
-				ctx.ui.notify("memctx: Deep enrichment requested, but no model is selected. Deterministic pack was still generated.", "warning");
-			} else if (llmMode !== "off" && !ctx.model) {
-				ctx.ui.notify("memctx: LLM enrichment skipped because no model is selected.", "warning");
-			}
 
-			// Index with qmd in the background if available; do not block Pi after generation.
-			if (qmdAvailable) {
-				const collection = `memctx-${slug}`;
-				qmdEmbed(collection, packPath).catch(() => {});
-			}
-
-			ctx.ui.notify(
-				`memctx: Pack "${slug}" generated with ${filesCreated.length} files from ${scanDir}`,
-				"info",
-			);
-
-			// Auto-switch to the new pack
+			// Auto-switch to the new pack immediately after deterministic generation.
 			_packsDir = packsDir;
 			vaultRoot = path.dirname(packsDir);
 			activePack = slug;
 			activePackPath = packPath;
 			qmdCollection = `memctx-${slug}`;
 			lastPackSwitch = { from: "", to: slug, reason: "generated new pack", confidence: "high", timestamp: nowTimestamp() };
+
+			const useLlm = !noDeep && !!ctx.model;
+			ctx.ui.notify(
+				`memctx: Pack "${slug}" generated with ${filesCreated.length} files from ${scanDir}${useLlm ? "\nmemctx: Deep enrichment started in background." : "\nmemctx: Deep enrichment skipped (no selected model or --no-deep)."}`,
+				"info",
+			);
 			ctx.ui.setStatus("memctx", buildStatusText());
+
+			if (packEnrichRunning) {
+				ctx.ui.notify("memctx: Another enrichment job is already running; generated pack will be indexed only.", "warning");
+				if (qmdAvailable) qmdEmbed(qmdCollection, packPath).catch(() => {});
+				return;
+			}
+
+			packEnrichRunning = true;
+			setTimeout(() => void (async () => {
+				const started = Date.now();
+				try {
+					const enriched = useLlm ? await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx, true) : [];
+					if (qmdAvailable) qmdEmbed(qmdCollection, packPath).catch(() => {});
+					ctx.ui.notify(`memctx: Background ${useLlm ? "deep enrichment and " : ""}indexing complete for "${slug}" in ${Date.now() - started}ms${enriched.length ? `\nupdated files: ${enriched.length}` : ""}`, "info");
+				} catch (err) {
+					ctx.ui.notify(`memctx: Background enrichment failed for "${slug}": ${err instanceof Error ? err.message : String(err)}`, "error");
+				} finally {
+					packEnrichRunning = false;
+					ctx.ui.setStatus("memctx", buildStatusText());
+				}
+			})(), 0);
 		},
 	};
 	pi.registerCommand("memctx-pack-generate", packGenerateCommand);
