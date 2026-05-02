@@ -45,10 +45,10 @@ Each task runs for each selected profile.
 ## Expected results
 
 With `qmd-economy`:
-- **Zero or near-zero tool calls** — injected answer plans remove exploratory `find`/`grep`/`read` loops
+- **Zero or near-zero unnecessary tool calls** — compact memory answers supported questions while still allowing search/source inspection when memory is incomplete
 - **Higher quality** — knows architecture decisions, conventions, runbooks
 - **Faster responses** — compact context produces direct answers instead of exploration
-- **Lower visible token usage** — concise fact cards reduce assistant output and follow-up prompts
+- **Lower visible token usage** — concise fact cards/search results reduce assistant output and follow-up prompts
 
 ## Output
 

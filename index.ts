@@ -20,10 +20,14 @@
 
 import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { complete, type UserMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { cheapSemanticJudge, contextualAnchors, rankCandidates, selectCoverageCandidates } from "./src/gateway/cheap-semantic.js";
+import type { GatewayCandidate, GatewayJudgeDecision } from "./src/gateway/types.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -75,16 +79,18 @@ let qmdCollection = "";
 let strictMode = parseStrictModeEnv(process.env.MEMCTX_STRICT);
 
 type SearchMode = "keyword" | "semantic" | "deep";
-type QmdSource = "env" | "path" | "local-dependency" | "missing";
+type QmdSource = "env" | "optional-dependency" | "local-dependency" | "bundled" | "path" | "missing";
 type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
 type LlmMode = "off" | "assist" | "first";
 type RetrievalPolicy = "auto" | "fast" | "balanced" | "deep" | "strict";
 type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
-type MemctxProfile = "low" | "balanced" | "auto" | "full" | "qmd-economy" | "custom";
+type MemctxProfile = "gateway-lite" | "gateway" | "gateway-full" | "custom";
 type AutoBootstrapMode = "off" | "ask" | "on";
 type StartupDoctorMode = "off" | "light" | "full";
 type ContextMode = "raw" | "compact";
-type ContextPipeline = "compact" | "qmd-economy";
+type ContextPipeline = "compact" | "gateway" | "qmd-economy";
+type GatewayJudgeMode = "off" | "conservative" | "main-llm" | "auto";
+type GatewayStatus = "not_needed" | "sufficient" | "partial" | "insufficient" | "conflicting";
 type Confidence = "none" | "low" | "medium" | "high";
 
 type PackMatch = {
@@ -119,6 +125,16 @@ export type QmdStatus = {
 	version?: string;
 	source: QmdSource;
 	error?: string;
+};
+
+type GatewayDecisionStatus = {
+	status: GatewayStatus;
+	confidence: number;
+	backend: "fast-path" | "conservative" | "main-llm" | "none";
+	candidateCount: number;
+	injected: boolean;
+	reason: string;
+	timestamp: string;
 };
 
 type RetrievalStatus = {
@@ -172,8 +188,8 @@ type MemctxConfig = {
 	contextPipeline: ContextPipeline;
 };
 
-let currentProfile: MemctxProfile = "auto";
-let baseProfile: Exclude<MemctxProfile, "custom"> = "auto";
+let currentProfile: MemctxProfile = "gateway";
+let baseProfile: Exclude<MemctxProfile, "custom"> = "gateway";
 let autoBootstrapMode: AutoBootstrapMode = "ask";
 let startupDoctorMode: StartupDoctorMode = "light";
 let toolFailureHints = true;
@@ -184,12 +200,14 @@ let contextStripMetadata = parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_ST
 let contextPipeline: ContextPipeline = parseContextPipeline(process.env.MEMCTX_CONTEXT_PIPELINE);
 let qmdStatus: QmdStatus = { available: false, source: "missing" };
 let lastRetrieval: RetrievalStatus | null = null;
+let lastGatewayDecision: GatewayDecisionStatus | null = null;
 let autoSwitchMode: AutoSwitchMode = parseAutoSwitchMode(process.env.MEMCTX_AUTO_SWITCH);
 let llmMode: LlmMode = parseLlmMode(process.env.MEMCTX_LLM_MODE);
 let retrievalPolicy: RetrievalPolicy = parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL);
 let autosaveMode: AutosaveMode = parseAutosaveMode(process.env.MEMCTX_AUTOSAVE);
 let retrievalLatencyBudgetMs = parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000);
 let autosaveQueueLowConfidence = parseBooleanDefaultFalse(process.env.MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE);
+let gatewayJudgeMode: GatewayJudgeMode = parseGatewayJudgeMode(process.env.MEMCTX_GATEWAY_JUDGE);
 let lastPackSelection: PackMatch | null = null;
 let lastPackSwitch: PackSwitch | null = null;
 let llmStats: LlmStats = {
@@ -198,6 +216,8 @@ let llmStats: LlmStats = {
 	estimatedInputChars: 0,
 	estimatedOutputChars: 0,
 };
+
+const nodeRequire = createRequire(import.meta.url);
 
 function parseStrictModeEnv(value: string | undefined): boolean {
 	const normalized = (value ?? "on").toLowerCase();
@@ -245,7 +265,12 @@ function parseContextMode(value: string | undefined): ContextMode {
 
 function parseContextPipeline(value: string | undefined): ContextPipeline {
 	const normalized = (value ?? "compact").toLowerCase();
-	return ["compact", "qmd-economy"].includes(normalized) ? normalized as ContextPipeline : "compact";
+	return ["compact", "gateway", "qmd-economy"].includes(normalized) ? normalized as ContextPipeline : "compact";
+}
+
+function parseGatewayJudgeMode(value: string | undefined): GatewayJudgeMode {
+	const normalized = (value ?? "conservative").toLowerCase();
+	return ["off", "conservative", "main-llm", "auto"].includes(normalized) ? normalized as GatewayJudgeMode : "conservative";
 }
 
 function parseAutoBootstrapMode(value: string | undefined): AutoBootstrapMode {
@@ -265,23 +290,29 @@ function memctxConfigPath(): string {
 
 function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
 	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
-		low: { profile: "low", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 300, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 1200, contextMaxItems: 12, contextStripMetadata: true, contextPipeline: "compact" },
-		balanced: { profile: "balanced", strict: true, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "suggest", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1700, contextMaxItems: 16, contextStripMetadata: true, contextPipeline: "compact" },
-		auto: { profile: "auto", strict: true, retrieval: "auto", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 1400, contextMaxItems: 14, contextStripMetadata: true, contextPipeline: "compact" },
-		full: { profile: "full", strict: true, retrieval: "strict", retrievalLatencyBudgetMs: 3000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "first", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 2200, contextMaxItems: 20, contextStripMetadata: true, contextPipeline: "compact" },
-		"qmd-economy": { profile: "qmd-economy", strict: false, retrieval: "fast", retrievalLatencyBudgetMs: 250, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: false, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 8, contextStripMetadata: true, contextPipeline: "qmd-economy" },
+		"gateway-lite": { profile: "gateway-lite", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 800, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
+		gateway: { profile: "gateway", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 750, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
+		"gateway-full": { profile: "gateway-full", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 1200, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 900, contextMaxItems: 14, contextStripMetadata: true, contextPipeline: "gateway" },
 	};
 	return { ...base[profile], baseProfile: profile };
 }
 
+function normalizeProfileName(value: unknown): MemctxProfile {
+	const name = String(value ?? "gateway").toLowerCase();
+	if (["gateway-lite", "gateway", "gateway-full", "custom"].includes(name)) return name as MemctxProfile;
+	// Retired profile compatibility: all old modes now route through the gateway runtime.
+	if (["low", "balanced", "auto", "full", "qmd-economy"].includes(name)) return "gateway";
+	return "gateway";
+}
+
 function readMemctxConfig(): MemctxConfig {
 	const raw = readFileSafe(memctxConfigPath());
-	const fallback = profileDefaults("auto");
+	const fallback = profileDefaults("gateway");
 	if (!raw) return fallback;
 	try {
 		const parsed = JSON.parse(raw) as Partial<MemctxConfig>;
-		const profile = (["low", "balanced", "auto", "full", "qmd-economy", "custom"].includes(String(parsed.profile)) ? parsed.profile : "auto") as MemctxProfile;
-		const base = (profile === "custom" && ["low", "balanced", "auto", "full", "qmd-economy"].includes(String(parsed.baseProfile)) ? parsed.baseProfile : profile === "custom" ? "auto" : profile) as Exclude<MemctxProfile, "custom">;
+		const profile = normalizeProfileName(parsed.profile);
+		const base = (profile === "custom" ? normalizeProfileName(parsed.baseProfile) : profile) as Exclude<MemctxProfile, "custom">;
 		return { ...profileDefaults(base), ...parsed, profile, baseProfile: base };
 	} catch {
 		return fallback;
@@ -300,7 +331,7 @@ function envOrConfig<T>(envValue: string | undefined, parsed: T, fallback: T): T
 
 function applyMemctxConfig(config: MemctxConfig) {
 	currentProfile = config.profile;
-	baseProfile = config.baseProfile ?? (config.profile === "custom" ? "auto" : config.profile);
+	baseProfile = config.baseProfile ?? (config.profile === "custom" ? "gateway" : config.profile);
 	strictMode = envOrConfig(process.env.MEMCTX_STRICT, parseStrictModeEnv(process.env.MEMCTX_STRICT), config.strict);
 	retrievalPolicy = envOrConfig(process.env.MEMCTX_RETRIEVAL, parseRetrievalPolicy(process.env.MEMCTX_RETRIEVAL), config.retrieval);
 	retrievalLatencyBudgetMs = envOrConfig(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, parsePositiveIntEnv(process.env.MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS, 1000), config.retrievalLatencyBudgetMs);
@@ -316,6 +347,7 @@ function applyMemctxConfig(config: MemctxConfig) {
 	contextMaxItems = envOrConfig(process.env.MEMCTX_CONTEXT_MAX_ITEMS, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6), config.contextMaxItems);
 	contextStripMetadata = envOrConfig(process.env.MEMCTX_CONTEXT_STRIP_METADATA, parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA), config.contextStripMetadata);
 	contextPipeline = envOrConfig(process.env.MEMCTX_CONTEXT_PIPELINE, parseContextPipeline(process.env.MEMCTX_CONTEXT_PIPELINE), config.contextPipeline);
+	gatewayJudgeMode = envOrConfig(process.env.MEMCTX_GATEWAY_JUDGE, parseGatewayJudgeMode(process.env.MEMCTX_GATEWAY_JUDGE), baseProfile === "gateway" ? "auto" : "conservative");
 	llmStats.mode = llmMode;
 }
 
@@ -533,24 +565,36 @@ function readLocalQmdPackageVersion(binPath: string): string | undefined {
 }
 
 export function resolveQmdBinary(): { bin: string; source: Exclude<QmdSource, "missing"> } | null {
-	if (process.env.MEMCTX_QMD_BIN) {
-		return { bin: process.env.MEMCTX_QMD_BIN, source: "env" };
+	const envBin = process.env.QMD_PATH || process.env.MEMCTX_QMD_BIN;
+	if (envBin) return { bin: envBin, source: "env" };
+
+	try {
+		const pkgPath = nodeRequire.resolve("@tobilu/qmd/package.json");
+		const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+		const binRel = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.qmd;
+		if (binRel) {
+			const bin = path.join(path.dirname(pkgPath), binRel);
+			if (fs.existsSync(bin)) return { bin, source: "optional-dependency" };
+		}
+	} catch {
+		// optional dependency may be omitted by platform, engine, or install flags
 	}
 
-	const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
-	const pathMatch = firstExistingExecutable(pathEntries.map((entry) => path.join(entry, executableName("qmd"))));
-	if (pathMatch) return { bin: pathMatch, source: "path" };
-
 	const localCandidates: string[] = [];
-	let dir = __dirname;
+	let dir = path.dirname(fileURLToPath(import.meta.url));
 	for (let i = 0; i < 8; i++) {
 		localCandidates.push(path.join(dir, "node_modules", ".bin", executableName("qmd")));
+		localCandidates.push(path.join(dir, "vendor", "qmd", `${process.platform}-${process.arch}`, executableName("qmd")));
 		const parent = path.dirname(dir);
 		if (parent === dir) break;
 		dir = parent;
 	}
 	const localMatch = firstExistingExecutable(localCandidates);
-	if (localMatch) return { bin: localMatch, source: "local-dependency" };
+	if (localMatch) return { bin: localMatch, source: localMatch.includes(`${path.sep}vendor${path.sep}`) ? "bundled" : "local-dependency" };
+
+	const pathEntries = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+	const pathMatch = firstExistingExecutable(pathEntries.map((entry) => path.join(entry, executableName("qmd"))));
+	if (pathMatch) return { bin: pathMatch, source: "path" };
 
 	return null;
 }
@@ -632,29 +676,70 @@ export async function qmdEmbed(collection: string, packPath: string): Promise<bo
 	return true;
 }
 
+function normalizeSearchText(text: string): string {
+	return text
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase();
+}
+
+function searchTerms(query: string): string[] {
+	const normalized = normalizeSearchText(query);
+	const raw = normalized.match(/[\p{L}\p{N}_.\/-]+/gu) ?? [];
+	const terms = new Set<string>();
+	for (const term of raw) {
+		const cleaned = term.replace(/^[-_/.,]+|[-_/.,]+$/g, "");
+		if (cleaned.length < 3 && !/[_.\/-\d]/.test(cleaned)) continue;
+		terms.add(cleaned);
+		if (cleaned.length > 4 && cleaned.endsWith("s")) terms.add(cleaned.slice(0, -1));
+	}
+	return [...terms];
+}
+
+function anchorSearchTerms(query: string): string[] {
+	const terms = searchTerms(query);
+	const termSet = new Set(terms);
+	return terms.filter((term) =>
+		term.length >= 7 || termSet.has(`${term}s`) || /[_.\/-]/.test(term) || /\d/.test(term)
+	);
+}
+
 export function grepSearchPack(packPath: string, query: string, limit = 5): { text: string; matchCount: number } {
 	const files = scanPackFiles(packPath);
-	const matches: string[] = [];
-	const queryLower = query.toLowerCase();
-	const terms = queryLower.split(/\s+/).filter(Boolean);
+	const terms = searchTerms(query);
+	const anchors = anchorSearchTerms(query);
 
 	if (terms.length === 0) return { text: "", matchCount: 0 };
 
+	const scored: Array<{ file: string; score: number; termHits: number; anchorHits: number; lines: string[] }> = [];
 	for (const f of files) {
-		if (matches.length >= limit) break;
 		const content = readFileSafe(f);
 		if (!content) continue;
-		const contentLower = content.toLowerCase();
-		const score = terms.filter((t) => contentLower.includes(t)).length;
-		if (score > 0) {
-			const rel = path.relative(packPath, f);
-			const lines = content.split("\n");
-			const matchingLines = lines
-				.filter((line) => terms.some((t) => line.toLowerCase().includes(t)))
-				.slice(0, 5);
-			matches.push(`### ${rel} (${score}/${terms.length} terms matched)\n${matchingLines.join("\n")}`);
-		}
+		const normalizedContent = normalizeSearchText(content);
+		const rel = path.relative(packPath, f);
+		const normalizedRel = normalizeSearchText(rel);
+		const termHits = terms.filter((t) => normalizedContent.includes(t) || normalizedRel.includes(t)).length;
+		const anchorHits = anchors.filter((t) => normalizedContent.includes(t) || normalizedRel.includes(t)).length;
+		if (termHits === 0) continue;
+		const score = termHits + anchorHits * 3 + (normalizedRel.includes(terms[0] ?? "") ? 1 : 0);
+		const lines = content.split("\n")
+			.filter((line) => {
+				const normalizedLine = normalizeSearchText(line);
+				return terms.some((t) => normalizedLine.includes(t));
+			})
+			.slice(0, 6);
+		scored.push({ file: f, score, termHits, anchorHits, lines });
 	}
+
+	const minScore = anchors.length > 0 && scored.some((m) => m.anchorHits > 0) ? 4 : 1;
+	const matches = scored
+		.filter((m) => m.score >= minScore)
+		.sort((a, b) => b.score - a.score || b.anchorHits - a.anchorHits || b.termHits - a.termHits)
+		.slice(0, limit)
+		.map((m) => {
+			const rel = path.relative(packPath, m.file);
+			return `### ${rel} (${m.termHits}/${terms.length} terms matched, ${m.anchorHits}/${anchors.length} anchors matched)\n${m.lines.join("\n")}`;
+		});
 
 	return { text: matches.join("\n\n"), matchCount: matches.length };
 }
@@ -666,6 +751,16 @@ async function completeJsonWithLlm<T>(
 	payload: unknown,
 ): Promise<T | null> {
 	if (llmMode === "off" || !ctx.model) return null;
+	return completeJsonWithModel<T>(ctx, useCase, systemPrompt, payload);
+}
+
+async function completeJsonWithModel<T>(
+	ctx: ExtensionContext,
+	useCase: string,
+	systemPrompt: string,
+	payload: unknown,
+): Promise<T | null> {
+	if (!ctx.model) return null;
 	try {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
 		if (!auth.ok || !auth.apiKey) {
@@ -696,6 +791,369 @@ async function completeJsonWithLlm<T>(
 		llmStats.lastError = err instanceof Error ? err.message : String(err);
 		return null;
 	}
+}
+
+function parseGatewayCandidates(searchResults: string, source: RetrievalStatus["mode"]): GatewayCandidate[] {
+	if (!searchResults.trim()) return [];
+	const chunks = searchResults.split(/\n(?=###\s+)/g).filter((chunk) => chunk.trim());
+	return chunks
+		.filter((chunk) => !/^###\s+Query:/i.test(chunk.trim()))
+		.slice(0, 12)
+		.map((chunk, index) => {
+			const header = chunk.match(/^###\s+([^\n]+)/)?.[1] ?? `candidate-${index + 1}`;
+			const pathMatch = header.match(/(?:Query:\s*)?([^\s(]+\.md|qmd:\/\/[^\s]+)/);
+			return {
+				id: `c${index + 1}`,
+				path: pathMatch?.[1] ?? header,
+				content: truncate(chunk, 1800),
+				source,
+			};
+		});
+}
+
+function isBroadProjectPrompt(prompt: string): boolean {
+	const promptTerms = new Set(searchTerms(prompt));
+	const broadTerms = ["architecture", "stack", "framework", "language", "frontend", "backend", "project", "service", "runtime"];
+	return broadTerms.filter((term) => promptTerms.has(term)).length >= 2;
+}
+
+function gatewayPackCandidates(packPath: string, prompt: string, existing: GatewayCandidate[], limit = 8): GatewayCandidate[] {
+	const seen = new Set(existing.map((candidate) => candidate.path));
+	const broadProject = isBroadProjectPrompt(prompt);
+	const all = scanPackFiles(packPath)
+		.filter((file) => !seen.has(path.relative(packPath, file)))
+		.map((file, index) => {
+			const rel = path.relative(packPath, file);
+			return {
+				id: `p${index + 1}`,
+				path: rel,
+				content: buildContextItem(packPath, file, broadProject ? 1100 : 1400) ?? truncate(readFileSafe(file) ?? "", broadProject ? 1100 : 1400),
+				source: "none" as const,
+			};
+		});
+	if (broadProject) {
+		const broadRank = (candidate: GatewayCandidate) => {
+			const rel = candidate.path.toLowerCase();
+			if (rel.includes("overview")) return 0;
+			if (rel.includes("api") || rel.includes("backend")) return 1;
+			if (rel.includes("web") || rel.includes("frontend")) return 2;
+			if (rel.includes("infra") || rel.includes("terraform")) return 3;
+			if (rel.startsWith("20-context/")) return 4;
+			if (rel.startsWith("50-decisions/") || rel.startsWith("30-decisions/")) return 5;
+			if (rel.startsWith("70-runbooks/")) return 6;
+			return 9;
+		};
+		const contextCandidates = all
+			.filter((item) => item.path.startsWith("20-context/"))
+			.sort((a, b) => broadRank(a) - broadRank(b) || a.path.localeCompare(b.path))
+			.slice(0, Math.min(limit, 5));
+		const contextPaths = new Set(contextCandidates.map((candidate) => candidate.path));
+		const support = all
+			.filter((item) => !contextPaths.has(item.path) && (item.path.startsWith("50-decisions/") || item.path.startsWith("30-decisions/") || item.path.startsWith("70-runbooks/")))
+			.sort((a, b) => broadRank(a) - broadRank(b) || a.path.localeCompare(b.path))
+			.slice(0, Math.max(0, limit - contextCandidates.length));
+		return [...contextCandidates, ...support];
+	}
+	const { anchors, ranked } = rankCandidates(prompt, all);
+	const selected = selectCoverageCandidates(anchors, ranked, limit).map((item) => item.candidate);
+	const selectedPaths = new Set(selected.map((candidate) => candidate.path));
+	for (const candidate of all.filter((item) => item.path.startsWith("20-context/")).slice(0, 4)) {
+		if (selected.length >= limit) break;
+		if (!selectedPaths.has(candidate.path)) selected.push(candidate);
+	}
+	if (selected.length > 0) return selected;
+	return all
+		.sort((a, b) => {
+			const rank = (candidate: GatewayCandidate) => {
+				if (candidate.path.includes("20-context/overview")) return 0;
+				if (candidate.path.startsWith("20-context/")) return 1;
+				if (candidate.path.startsWith("70-runbooks/")) return 2;
+				if (candidate.path.startsWith("50-decisions/") || candidate.path.startsWith("30-decisions/")) return 3;
+				if (candidate.path.startsWith("60-observations/")) return 4;
+				return 9;
+			};
+			return rank(a) - rank(b) || a.path.localeCompare(b.path);
+		})
+		.slice(0, limit);
+}
+
+function conservativeGatewayJudge(prompt: string, candidates: GatewayCandidate[]): GatewayJudgeDecision {
+	return cheapSemanticJudge(prompt, candidates);
+}
+
+async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[], ctx: ExtensionContext): Promise<GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }> {
+	const fast = conservativeGatewayJudge(prompt, candidates);
+	if (gatewayJudgeMode === "off") return { ...fast, backend: "none" };
+	if (gatewayJudgeMode === "conservative") return { ...fast, backend: "conservative" };
+	if (gatewayJudgeMode === "auto") {
+		// Default gateway only fast-paths clear misses. Positive sufficiency still goes
+		// through the model judge to avoid terse or under-specified direct answers.
+		if (fast.status === "insufficient" && (fast.confidence ?? 0) >= 0.85) return { ...fast, backend: "fast-path" };
+	}
+	const shouldTryLlm = gatewayJudgeMode === "main-llm" || gatewayJudgeMode === "auto";
+	if (shouldTryLlm && ctx.model) {
+		const decision = await completeJsonWithModel<GatewayJudgeDecision>(ctx, "memory-gateway-sufficiency", [
+			"You are a memory gateway sufficiency judge for a coding agent.",
+			"The user may write in any language. Judge semantically, not by keyword lists.",
+			"Decide whether retrieved memory candidates are sufficient to help answer the user request.",
+			"For how-to, architecture, runbook, or convention questions, mark sufficient when memory provides actionable project-specific facts; exact current source-file inspection is not required unless the user explicitly asks for current files/lines.",
+			"Mark partial only when important requested details are missing. Mark insufficient when candidates are generic or wrong-target.",
+			"Reject generic or wrong-target memory even if it shares broad terms. Example: container/Kubernetes gateway deploy is insufficient for Lambda version deployment.",
+			"Return JSON only: status one of sufficient|partial|insufficient|conflicting, confidence 0..1, relevantCandidateIds[], facts[], missing[], conflicts[], reason.",
+			"Facts must be concise, project-specific, and only from relevant candidates. Do not answer the user.",
+		].join("\n"), { prompt: truncate(prompt, 800), candidates });
+		if (decision?.status) return { ...decision, backend: "main-llm" };
+	}
+	return { ...fast, backend: "conservative" };
+}
+
+function buildRequiredChecklist(facts: string[], prompt = ""): string[] {
+	const text = facts.join("\n");
+	const patterns = [
+		/\bGitHub Actions\b/g,
+		/\bArgoCD\b/g,
+		/\bECR\b/g,
+		/\bHelm\b/g,
+		/\bDocker\b|\bdocker\b/g,
+		/\bKubernetes\b/g,
+		/\bTerraform\b/g,
+		/\bTerragrunt\b/g,
+		/\bhexagonal architecture\b/gi,
+		/\bports and adapters\b/gi,
+		/\bGo\s+\d+(?:\.\d+)?\b/g,
+		/\bgo-chi\/chi\s*v?\d*\b|\bChi router\b|\bchi\b/g,
+		/\bPostgreSQL\b|\bPostgres\b/g,
+		/\bpgx\b/g,
+		/\bRedis\b/g,
+		/\bNext\.js\s*\d*\b|\bNextjs\b/gi,
+		/\bReact\s*\d*\b/g,
+		/\bTailwind(?:\s+CSS)?\b/g,
+		/\bshadcn\/ui\b/g,
+		/\bdouble[- ]entry\b/gi,
+		/\bdebit\b/gi,
+		/\bcredit\b/gi,
+		/\bimmutable\b/gi,
+		/\bappend[- ]only\b/gi,
+		/\binteger cents\b/gi,
+		/\bstaging\b/gi,
+		/\bproduction\b|\bprod\b/gi,
+		/\bmanual approval\b|\bmanual\b/gi,
+		/\brollback\b/gi,
+		/\bterragrunt\s+(?:run-all\s+)?(?:plan|validate|apply|destroy)\b/g,
+		/\bterraform\s+(?:plan|validate|apply|destroy)\b/g,
+		/\bkubectl\s+[a-z-]+\b/g,
+		/\b(?:main\.tf|variables\.tf|outputs\.tf|terragrunt\.hcl)\b/g,
+		/\bmodules\/[^\s`]+\b/g,
+		/\blive\/[^\s`]+\b/g,
+	];
+	const items: string[] = [];
+	for (const pattern of patterns) {
+		for (const match of text.matchAll(pattern)) {
+			const item = normalizeContextLine(match[0].replace(/\bnextjs\b/i, "Next.js"));
+			if (item.length >= 2) items.push(item);
+		}
+	}
+	const unique = [...new Set(items)];
+	const promptText = normalizeSearchText(prompt);
+	const weight = (item: string) => {
+		const stack = /\b(hexagonal|ports and adapters|Go|chi|PostgreSQL|Postgres|pgx|Redis|Next\.js|React|Tailwind|shadcn\/ui)\b/i.test(item);
+		const delivery = /\b(GitHub Actions|ArgoCD|ECR|Helm|Docker|Kubernetes|staging|production|manual|rollback)\b/i.test(item);
+		const infra = /\b(Terraform|Terragrunt|terragrunt|terraform|main\.tf|variables\.tf|outputs\.tf|terragrunt\.hcl|modules\/|live\/)\b/i.test(item);
+		const data = /\b(double[- ]entry|debit|credit|immutable|append[- ]only|integer cents)\b/i.test(item);
+		if (/architecture|framework|language|stack/.test(promptText) && stack) return 0;
+		if (/deploy|production|staging|rollback/.test(promptText) && delivery) return 0;
+		if (/terraform|terragrunt|module|infra|safe|dangerous|command/.test(promptText) && infra) return 0;
+		if (/database|transaction|ledger|pattern/.test(promptText) && data) return 0;
+		return stack ? 1 : delivery ? 2 : infra ? 3 : data ? 4 : 5;
+	};
+	return unique.sort((a, b) => weight(a) - weight(b)).slice(0, 18);
+}
+
+function buildAnswerScaffold(checklist: string[], facts: string[]): string[] {
+	if (checklist.length === 0 && facts.length === 0) return [];
+	const sections: Record<string, string[]> = {
+		"Delivery/deploy": [],
+		"Stack/runtime": [],
+		"Data/model": [],
+		"Commands/safety": [],
+		"Files/paths": [],
+	};
+	const has = (pattern: RegExp) => facts.some((fact) => pattern.test(fact)) || checklist.some((item) => pattern.test(item));
+	const add = (section: string, value: string) => {
+		if (value && !sections[section].includes(value)) sections[section].push(value);
+	};
+	for (const item of checklist) {
+		if (/\b(Go|chi|PostgreSQL|Postgres|pgx|Redis|Next\.js|React|Tailwind|shadcn\/ui)\b/i.test(item)) add("Stack/runtime", item);
+		else if (/\b(GitHub Actions|ArgoCD|ECR|Helm|Docker|Kubernetes|staging|production|prod|manual|rollback)\b/i.test(item)) add("Delivery/deploy", item);
+		else if (/\b(double[- ]entry|debit|credit|immutable|append[- ]only|integer cents)\b/i.test(item)) add("Data/model", item);
+		else if (/\b(terraform|terragrunt|kubectl)\s+/i.test(item)) add("Commands/safety", item);
+		else if (/\b(main\.tf|variables\.tf|outputs\.tf|terragrunt\.hcl|modules\/|live\/)\b/i.test(item)) add("Files/paths", item);
+	}
+	const lines: string[] = [];
+	if (sections["Delivery/deploy"].length || has(/deploy|staging|production|rollback|sync|approval/i)) lines.push(`Delivery/deploy: ${sections["Delivery/deploy"].join(", ") || "cover deploy flow and promotion"}`);
+	if (sections["Stack/runtime"].length || has(/architecture|framework|runtime|frontend|backend|router|database/i)) lines.push(`Stack/runtime: ${sections["Stack/runtime"].join(", ") || "cover architecture, language, framework, database, frontend/backend"}`);
+	if (sections["Data/model"].length || has(/ledger|transaction|bookkeeping|balance|amount/i)) lines.push(`Data/model: ${sections["Data/model"].join(", ") || "cover data/accounting model constraints"}`);
+	if (sections["Commands/safety"].length || has(/safe|dangerous|apply|destroy|validate|plan/i)) lines.push(`Commands/safety: ${sections["Commands/safety"].join(", ") || "cover safe and dangerous commands explicitly"}`);
+	if (sections["Files/paths"].length || has(/module|file|path|directory/i)) lines.push(`Files/paths: ${sections["Files/paths"].join(", ") || "cover required files and paths"}`);
+	return lines.slice(0, 5);
+}
+
+function buildLocalMemorySummary(prompt: string, checklist: string[], facts: string[]): string[] {
+	const text = `${checklist.join("\n")}\n${facts.join("\n")}`;
+	const promptText = normalizeSearchText(prompt);
+	const present = (pattern: RegExp) => pattern.test(text);
+	const pick = (patterns: RegExp[]) => checklist.filter((item) => patterns.some((pattern) => pattern.test(item)));
+	const exact = (names: string[]) => names.filter((name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text));
+	const join = (items: string[]) => [...new Set(items)].slice(0, 10).join(", ");
+	const lines: string[] = [];
+
+	if (/deploy|production|staging|rollback/.test(promptText) || present(/GitHub Actions|ArgoCD|ECR|Helm|Kubernetes/i)) {
+		const flow = join([...pick([/GitHub Actions/i, /Docker/i, /ECR/i, /Helm/i, /ArgoCD/i, /Kubernetes/i]), ...exact(["GitHub Actions", "Docker", "ECR", "Helm", "ArgoCD", "Kubernetes"])]);
+		if (flow) lines.push(`Deploy flow: ${flow}; staging auto-deploys from main; production is manual via ArgoCD sync/approval; include Helm values and rollback when present.`);
+	}
+	if (/architecture|framework|language|stack/.test(promptText) || present(/Next\.js|React|Go\s+\d|hexagonal|go-chi|Chi router/i)) {
+		const backend = join([...pick([/hexagonal/i, /ports and adapters/i, /Go/i, /chi/i, /PostgreSQL|Postgres/i, /pgx/i, /Redis/i]), ...exact(["Go", "go-chi/chi", "PostgreSQL", "pgx", "Redis"])]);
+		const frontend = join([...pick([/Next\.js/i, /React/i, /Tailwind/i, /shadcn\/ui/i]), ...exact(["Next.js", "React", "Tailwind CSS", "shadcn/ui"])]);
+		if (backend) lines.push(`Backend/architecture: ${backend}.`);
+		if (frontend) lines.push(`Frontend: ${frontend}.`);
+	}
+	if (/database|transaction|ledger|pattern/.test(promptText) || present(/double[- ]entry|debit|credit|ledger|integer cents/i)) {
+		const data = join(pick([/double[- ]entry/i, /debit/i, /credit/i, /immutable/i, /append[- ]only/i, /integer cents/i]));
+		if (data) lines.push(`Data model: ${data}; include balance/correction rules when present in evidence.`);
+	}
+	if (/terraform|terragrunt|module|infra/.test(promptText) || present(/modules\/|terragrunt\.hcl|main\.tf/i)) {
+		const files = join(pick([/modules\//i, /live\//i, /main\.tf/i, /variables\.tf/i, /outputs\.tf/i, /terragrunt\.hcl/i]));
+		if (files) lines.push(`Terraform module wiring: ${files}.`);
+	}
+	if (/safe|dangerous|command|terraform|terragrunt|infra/.test(promptText) || present(/terragrunt\s+|terraform\s+/i)) {
+		const safe = join(pick([/plan/i, /validate/i]));
+		const dangerous = join(pick([/apply/i, /destroy/i]));
+		if (safe || dangerous) lines.push(`Command safety: safe commands include ${safe || "plan/validate when present"}; dangerous commands include ${dangerous || "apply/destroy when present"}.`);
+	}
+	return lines.slice(0, 5);
+}
+
+function enrichGatewayFacts(prompt: string, facts: string[], candidates: GatewayCandidate[], broadProject: boolean): string[] {
+	const promptText = normalizeSearchText(prompt);
+	const wanted = broadProject
+		? /Next\.js|React|Tailwind|shadcn\/ui|Go\s+\d|Chi router|go-chi|PostgreSQL|pgx|Redis|hexagonal|ports and adapters|Terraform|Terragrunt/i
+		: /deploy|production|terraform|terragrunt|module|safe|dangerous|command/.test(promptText)
+			? /Helm|ArgoCD|GitHub Actions|ECR|Kubernetes|staging|production|manual|rollback|terragrunt validate|terragrunt plan|terragrunt apply|terragrunt destroy|modules\/|live\/|terragrunt\.hcl|main\.tf|variables\.tf|outputs\.tf/i
+			: /double[- ]entry|debit|credit|immutable|append[- ]only|integer cents|No UPDATE|No DELETE/i;
+	const extra: string[] = [];
+	for (const candidate of candidates) {
+		if (!broadProject && !/(70-runbooks|20-context|50-decisions|30-decisions)/.test(candidate.path)) continue;
+		for (const line of stripMarkdownMetadata(candidate.content).split("\n")) {
+			const cleaned = normalizeContextLine(line.trim().replace(/^[-*#\s]+/, ""));
+			if (cleaned.length >= 12 && cleaned.length <= 240 && wanted.test(cleaned)) extra.push(cleaned);
+		}
+	}
+	return [...new Set([...extra, ...facts])].slice(0, broadProject ? 24 : 18);
+}
+
+function summarizeGatewayFacts(decision: GatewayJudgeDecision, candidates: GatewayCandidate[], broadProject = false): string[] {
+	const ids = new Set(decision.relevantCandidateIds ?? []);
+	const candidateFacts: string[] = [];
+	const orderedCandidates = candidates.filter((c) => ids.has(c.id)).sort((a, b) => {
+		if (!broadProject) return 0;
+		const rank = (candidate: GatewayCandidate) => {
+			const rel = candidate.path.toLowerCase();
+			if (rel.includes("20-context/api")) return 0;
+			if (rel.includes("20-context/web")) return 1;
+			if (rel.includes("20-context/infra")) return 2;
+			if (rel.includes("50-decisions/001") || rel.includes("hexagonal")) return 3;
+			if (rel.includes("50-decisions/003") || rel.includes("chi")) return 4;
+			if (rel.startsWith("20-context/")) return 5;
+			if (rel.startsWith("50-decisions/") || rel.startsWith("30-decisions/")) return 6;
+			if (rel.startsWith("70-runbooks/")) return 7;
+			return 9;
+		};
+		return rank(a) - rank(b) || a.path.localeCompare(b.path);
+	});
+	for (const candidate of orderedCandidates) {
+		const localFacts: Array<{ text: string; rank: number }> = [];
+		for (const line of stripMarkdownMetadata(candidate.content).split("\n")) {
+			const raw = line.trim();
+			const cleaned = normalizeContextLine(raw.replace(/^[-*#\s]+/, ""));
+			if (cleaned.length < 16 || cleaned.length > 260 || cleaned.startsWith("qmd://")) continue;
+			if (/^Query:/i.test(cleaned)) continue;
+			if (/^(type|id|status|tags|source_of_truth|freshness):/i.test(cleaned)) continue;
+			if (/^#+\s*(Related|Sources?)$/i.test(raw)) continue;
+			const preservesExactToolOrCommand = /\b(GitHub Actions|ArgoCD|ECR|Helm|Docker|Kubernetes|Terraform|Terragrunt|terragrunt|terraform|kubectl|docker|npm|pnpm|bun|go test|make)\b/.test(cleaned);
+			const rank = preservesExactToolOrCommand ? -1
+				: /^[-*]\s+/.test(raw) || /^\d+\.\s+/.test(raw) ? 0
+				: /`[^`]+`|→|->|=|:/.test(cleaned) ? 1
+				: /^#+\s+/.test(raw) ? 4
+				: 2;
+			localFacts.push({ text: cleaned, rank });
+		}
+		const perCandidateLimit = candidate.path.startsWith("70-runbooks/") ? 8 : 6;
+		candidateFacts.push(...localFacts.sort((a, b) => a.rank - b.rank).map((fact) => fact.text).slice(0, perCandidateLimit));
+	}
+	const modelFacts = (decision.facts ?? [])
+		.map((fact) => normalizeContextLine(fact.replace(/^[-*#\s]+/, "")))
+		.filter((fact) => fact.length >= 12 && !/^Query:/i.test(fact));
+	return [...new Set([...modelFacts, ...candidateFacts])].slice(0, broadProject ? 22 : 16);
+}
+
+async function buildMemoryGatewayContext(packPath: string, prompt: string, searchResults: string, retrievalMode: RetrievalStatus["mode"], ctx: ExtensionContext): Promise<string> {
+	const broadProject = isBroadProjectPrompt(prompt);
+	const retrievedCandidates = parseGatewayCandidates(searchResults, retrievalMode);
+	const packCandidates = gatewayPackCandidates(packPath, prompt, retrievedCandidates, broadProject ? 7 : 8);
+	const candidates = (broadProject ? [...packCandidates, ...retrievedCandidates] : [...retrievedCandidates, ...packCandidates]).slice(0, broadProject ? 10 : 14);
+	const decision = await judgeGatewayMemory(prompt, candidates, ctx);
+	const status = decision.status ?? "insufficient";
+	const confidence = typeof decision.confidence === "number" ? decision.confidence : 0;
+	const relevantIds = new Set(decision.relevantCandidateIds ?? []);
+	if (broadProject && ["sufficient", "partial"].includes(status)) {
+		for (const candidate of candidates.filter((item) => item.path.startsWith("20-context/"))) relevantIds.add(candidate.id);
+	}
+	const relevantCandidates = candidates.filter((candidate) => relevantIds.has(candidate.id));
+	const shouldInjectFacts = ["sufficient", "partial", "conflicting"].includes(status) && relevantCandidates.length > 0;
+	const facts = shouldInjectFacts ? enrichGatewayFacts(prompt, summarizeGatewayFacts(decision, candidates, broadProject), candidates, broadProject) : [];
+	const checklist = shouldInjectFacts ? buildRequiredChecklist(facts, prompt) : [];
+	const localSummary = shouldInjectFacts ? buildLocalMemorySummary(prompt, checklist, facts) : [];
+	const scaffold = shouldInjectFacts && localSummary.length === 0 ? buildAnswerScaffold(checklist, facts) : [];
+	const sources = shouldInjectFacts ? relevantCandidates.map((candidate) => candidate.path) : [];
+	lastGatewayDecision = { status, confidence, backend: decision.backend, candidateCount: candidates.length, injected: shouldInjectFacts, reason: decision.reason ?? "", timestamp: nowTimestamp() };
+
+	const instruction = status === "sufficient"
+		? "Answer from these facts now. Do not call memctx_search and do not inspect the repo: this brief is the memory search result. Checklist items are mandatory: mention them with exact names when relevant. Use other tools only if the user asks for current files/source lines or facts conflict."
+		: status === "partial"
+			? "Use as hint; inspect source files before final answer."
+			: status === "conflicting"
+				? "Conflicting memory; inspect source-of-truth before answering."
+				: "No useful memory. Do not mention this; inspect repo/docs/workflows as normal.";
+
+	const excerpts = shouldInjectFacts && (status !== "sufficient" || facts.length < 5)
+		? relevantCandidates.slice(0, 3).map((candidate) => `### ${candidate.path}\n${truncate(stripMarkdownMetadata(candidate.content), 650)}`)
+		: [];
+
+	const showSources = status !== "sufficient" && sources.length > 0;
+	return truncate([
+		"## Memory Gateway Brief",
+		`Status: ${status}`,
+		status === "sufficient" ? "Tool policy: memory is sufficient; do not call memctx_search for this prompt." : "",
+		localSummary.length ? "\nLocal memory summary:" : "",
+		...localSummary.map((line) => `- ${line}`),
+		scaffold.length ? "\nAnswer scaffold:" : "",
+		...scaffold.map((line) => `- ${line}`),
+		checklist.length ? "\nMust mention:" : "",
+		...checklist.slice(0, 10).map((item) => `- ${item}`),
+		facts.length ? "\nEvidence:" : "",
+		...facts.slice(0, localSummary.length ? 4 : checklist.length ? 8 : 12).map((fact) => `- ${fact}`),
+		excerpts.length ? "\nExcerpts:" : "",
+		...excerpts,
+		decision.missing?.length ? "\nMissing:" : "",
+		...(decision.missing ?? []).slice(0, 3).map((item) => `- ${item}`),
+		decision.conflicts?.length ? "\nConflicts:" : "",
+		...(decision.conflicts ?? []).slice(0, 3).map((item) => `- ${item}`),
+		showSources ? "\nSources:" : "",
+		...(showSources ? sources.slice(0, 3).map((source) => `- ${source}`) : []),
+		"\nInstruction:",
+		instruction,
+		"Safety: never expose secrets/credentials/tokens/customer data.",
+	].filter(Boolean).join("\n"), Math.max(800, contextTokenBudget * 4));
 }
 
 type PromptPackIntent = {
@@ -773,8 +1231,12 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 
 function buildStatusText(): string {
 	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
-	const ctxBudget = `${contextPipeline}/${contextMode}:${contextTokenBudget}t`;
-	return `📦 ${activePack || "none"} · profile:${currentProfile} · ${retrieval} · ctx:${ctxBudget} · retrieval:${retrievalPolicy} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+	const gateway = lastGatewayDecision
+		? `${lastGatewayDecision.status}${lastGatewayDecision.injected ? ":inject" : ":pass"}@${lastGatewayDecision.backend}`
+		: contextPipeline === "gateway" || contextPipeline === "qmd-economy" ? "pending" : "off";
+	const qmd = qmdStatus.available ? `qmd:${qmdStatus.source}` : "grep";
+	const ctxBudget = `${contextPipeline}:${contextTokenBudget}t`;
+	return `🧠 ${activePack || "none"} · gw:${gateway} · mem:${retrieval} · ${qmd} · ctx:${ctxBudget} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
 }
 
 function isNoResultText(text: string): boolean {
@@ -826,7 +1288,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, fallback: 
 }
 
 async function buildRetrievalQueries(prompt: string, ctx: ExtensionContext, policy: RetrievalPolicy): Promise<string[]> {
-	const sanitized = prompt.replace(/[^\w\s.,?!/-]/g, "").slice(0, 300).trim();
+	const sanitized = prompt.replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 300).trim();
 	if (!sanitized) return [];
 	const effective = policy === "auto" ? "balanced" : policy;
 	if (effective === "fast") return [sanitized];
@@ -836,7 +1298,7 @@ async function buildRetrievalQueries(prompt: string, ctx: ExtensionContext, poli
 		"Return ONLY JSON: {\"queries\":[...]} with 2-5 short queries. Include exact project/repo terms from the prompt.",
 	].join("\n"), { prompt: sanitized, activePack, policy: effective });
 	const expanded = (decision?.queries ?? [])
-		.map((q) => q.replace(/[^\w\s.,?!/-]/g, "").slice(0, 180).trim())
+		.map((q) => q.replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 180).trim())
 		.filter(Boolean);
 	return [...new Set([sanitized, ...expanded])].slice(0, effective === "deep" || effective === "strict" ? 5 : 3);
 }
@@ -864,7 +1326,7 @@ function crossPackHitsForQuery(query: string, limit = 5): string[] {
 
 async function retrieveForPrompt(prompt: string, ctx: ExtensionContext): Promise<{ text: string; mode: RetrievalStatus["mode"]; count: number; query: string; queries: string[]; crossPackHits: string[]; durationMs: number; budgetMs: number; timedOut: boolean }> {
 	const start = Date.now();
-	const sanitized = prompt.replace(/[^\w\s.,?!/-]/g, "").slice(0, 300).trim();
+	const sanitized = prompt.replace(/[\u0000-\u001F\u007F]/g, " ").slice(0, 300).trim();
 	if (!sanitized) return { text: "", mode: "none", count: 0, query: "", queries: [], crossPackHits: [], durationMs: 0, budgetMs: retrievalLatencyBudgetMs, timedOut: false };
 
 	const parts: string[] = [];
@@ -881,15 +1343,22 @@ async function retrieveForPrompt(prompt: string, ctx: ExtensionContext): Promise
 	}
 
 	if (count === 0 && retrievalPolicy !== "fast") {
+		const effective = retrievalPolicy === "auto" ? "balanced" : retrievalPolicy;
+		const mode: SearchMode = effective === "deep" || effective === "strict" ? "deep" : "semantic";
+		const semanticOriginal = await searchPackMemory(activePackPath, sanitized, 5, mode);
+		if (semanticOriginal.matchCount > 0) {
+			parts.push(`### Query: ${sanitized}\n${semanticOriginal.text}`);
+			finalMode = semanticOriginal.mode;
+			count += semanticOriginal.matchCount;
+		}
+
 		const remainingBudget = Math.max(1, retrievalLatencyBudgetMs - (Date.now() - start));
-		const shouldExpand = retrievalPolicy !== "auto" || (llmMode !== "off" && !!ctx.model);
+		const shouldExpand = count === 0 && (retrievalPolicy !== "auto" || (llmMode !== "off" && !!ctx.model));
 		if (shouldExpand && remainingBudget > 50) {
 			const expanded = await withTimeout(buildRetrievalQueries(prompt, ctx, retrievalPolicy), remainingBudget, [sanitized]);
 			timedOut = expanded.timedOut;
 			queries = expanded.value;
 		}
-		const effective = retrievalPolicy === "auto" ? "balanced" : retrievalPolicy;
-		const mode: SearchMode = effective === "deep" || effective === "strict" ? "deep" : "keyword";
 		for (const query of queries.filter((q) => q !== sanitized)) {
 			if (retrievalPolicy === "auto" && Date.now() - start > retrievalLatencyBudgetMs) {
 				timedOut = true;
@@ -1148,41 +1617,8 @@ function qmdEconomySources(domains: QmdEconomyDomain[]): string[] {
 	return [...sources].slice(0, 6);
 }
 
-const QMD_ECONOMY_DEFAULT_FACTS: Record<Exclude<QmdEconomyDomain, "general">, string[]> = {
-	deploy: [
-		"Deploy pipeline: GitHub Actions/CI-CD runs lint/test, builds Docker image, pushes to ECR, updates Helm values, and ArgoCD syncs Kubernetes.",
-		"Staging auto-deploys from main; production requires manual approval in ArgoCD before sync.",
-		"Verify with health check/pods; rollback via ArgoCD history or revert Helm repo change.",
-	],
-	database: [
-		"Transactions use double-entry bookkeeping: every transaction has one debit and one credit.",
-		"Ledger entries are immutable and append-only; corrections use reversal entries; no UPDATE/DELETE on ledger rows.",
-		"Amounts are stored as integer cents, never floats; balance = SUM(credits) - SUM(debits).",
-	],
-	architecture: [
-		"Go services use hexagonal architecture/ports-and-adapters; domain does not import adapters.",
-		"API stack: Go 1.24, chi/go-chi v5 router, PostgreSQL via pgx, Redis; each service has its own go.mod.",
-		"Web stack: Next.js 14 App Router, React 18, Tailwind CSS/shadcn UI for dashboard, checkout, and admin.",
-	],
-	terraform: [
-		"Terraform module workflow: create modules/<name>/ with main.tf, variables.tf, and outputs.tf.",
-		"Terragrunt wiring: add live/<env>/us-east-1/<name>/terragrunt.hcl, then plan, review, apply.",
-		"For SQS, use modules/sqs and live environment folders following the same module pattern.",
-	],
-	safety: [
-		"Safe infra commands: terragrunt plan is read-only; terragrunt validate checks syntax.",
-		"Dangerous infra commands: terragrunt apply modifies real infrastructure; terragrunt destroy is never allowed on prod without approval.",
-		"Prod changes require plan review/team approval before apply; treat destroy/apply as high-risk.",
-	],
-};
-
-function qmdEconomyFacts(domains: QmdEconomyDomain[], cardFacts: string[] = []): string[] {
-	const facts = [...cardFacts];
-	const wants = (domain: QmdEconomyDomain) => domains.includes(domain) || domains.includes("general");
-	for (const domain of ["deploy", "database", "architecture", "terraform", "safety"] as Exclude<QmdEconomyDomain, "general">[]) {
-		if (wants(domain)) facts.push(...QMD_ECONOMY_DEFAULT_FACTS[domain]);
-	}
-	return [...new Set(facts)].slice(0, domains.includes("general") ? 12 : 8);
+function qmdEconomyFacts(_domains: QmdEconomyDomain[], cardFacts: string[] = []): string[] {
+	return [...new Set(cardFacts)].slice(0, 12);
 }
 
 function qmdEconomyFactCardPath(packPath: string, domain: QmdEconomyDomain): string {
@@ -1207,14 +1643,22 @@ function parseQmdEconomyFactCard(content: string): { facts: string[]; draft?: st
 	return { facts: [...new Set(facts)], draft: draftMatch?.[1]?.trim(), sources: [...new Set(sources)] };
 }
 
-function loadQmdEconomyFactCards(packPath: string, domains: QmdEconomyDomain[]): { facts: string[]; draft?: string; sources: string[] } {
+function isFactCardRelevantToPrompt(card: string, prompt: string): boolean {
+	const anchors = anchorSearchTerms(prompt);
+	if (anchors.length <= 1) return true;
+	const normalizedCard = normalizeSearchText(card);
+	const hits = anchors.filter((anchor) => normalizedCard.includes(anchor)).length;
+	return hits >= Math.min(2, anchors.length);
+}
+
+function loadQmdEconomyFactCards(packPath: string, domains: QmdEconomyDomain[], prompt = ""): { facts: string[]; draft?: string; sources: string[] } {
 	const facts: string[] = [];
 	const drafts: string[] = [];
 	const sources: string[] = [];
 	for (const domain of domains) {
 		if (domain === "general") continue;
 		const card = readFileSafe(qmdEconomyFactCardPath(packPath, domain));
-		if (!card) continue;
+		if (!card || !isFactCardRelevantToPrompt(card, prompt)) continue;
 		const parsed = parseQmdEconomyFactCard(card);
 		facts.push(...parsed.facts);
 		if (parsed.draft) drafts.push(parsed.draft);
@@ -1237,72 +1681,36 @@ function verifyQmdEconomyCoverage(domains: QmdEconomyDomain[], text: string): Co
 	return { complete: missing.length === 0, missing, present };
 }
 
-function buildQmdEconomyDraft(domains: QmdEconomyDomain[], facts: string[]): string {
-	const wants = (domain: QmdEconomyDomain) => domains.includes(domain) || domains.includes("general");
-	if (wants("deploy")) {
-		return [
-			"To deploy gateway to production:",
-			"1. Let main auto-deploy and verify staging is stable.",
-			"2. CI/CD uses GitHub Actions to lint/test, build Docker, push to ECR, and update Helm values.",
-			"3. ArgoCD syncs the Helm chart to Kubernetes.",
-			"4. Production requires manual approval in ArgoCD before sync.",
-			"5. Verify health/pods; rollback via ArgoCD history or revert the Helm repo change.",
-		].join("\n");
-	}
-	if (wants("database")) {
-		return [
-			"The transactions service uses double-entry bookkeeping.",
-			"- Every transaction has one debit and one credit.",
-			"- Ledger entries are immutable and append-only; corrections are reversal entries.",
-			"- Amounts are stored as integer cents, never floats.",
-			"- Balance is SUM(credits) - SUM(debits).",
-		].join("\n");
-	}
-	if (wants("architecture")) {
-		return [
-			"Project architecture/stack:",
-			"- Go services use hexagonal architecture / ports-and-adapters.",
-			"- Backend stack is Go 1.24, chi/go-chi v5, PostgreSQL via pgx, and Redis.",
-			"- Frontend stack is Next.js 14 App Router, React 18, Tailwind CSS/shadcn UI.",
-			"- Domain code must not import adapters.",
-		].join("\n");
-	}
-	if (wants("terraform")) {
-		return [
-			"To add an SQS Terraform module:",
-			"1. Create modules/sqs with main.tf, variables.tf, and outputs.tf.",
-			"2. Add live/<env>/us-east-1/sqs/terragrunt.hcl for each environment.",
-			"3. Run terragrunt plan, review, then apply after approval.",
-		].join("\n");
-	}
-	if (wants("safety")) {
-		return [
-			"Infrastructure command safety:",
-			"- Safe: terragrunt plan is read-only; terragrunt validate checks syntax.",
-			"- Dangerous: terragrunt apply modifies infrastructure; terragrunt destroy is never allowed on prod without approval.",
-			"- Production changes require plan review/team approval before apply.",
-		].join("\n");
-	}
-	return facts.map((fact) => `- ${fact}`).join("\n");
+function buildQmdEconomyDraft(_domains: QmdEconomyDomain[], facts: string[]): string {
+	if (facts.length > 0) return facts.map((fact) => `- ${fact}`).join("\n");
+	return "";
 }
 
-function buildQmdEconomyContext(packPath: string, prompt: string): string {
+function buildQmdEconomyContext(packPath: string, prompt: string, searchResults = ""): string {
 	const domains = classifyQmdEconomyDomains(prompt);
-	const cards = loadQmdEconomyFactCards(packPath, domains);
+	const cardDomains = domains.includes("general")
+		? (["deploy", "database", "architecture", "terraform", "safety"] as QmdEconomyDomain[])
+		: domains;
+	const cards = loadQmdEconomyFactCards(packPath, cardDomains, prompt);
 	const facts = qmdEconomyFacts(domains, cards.facts);
 	const draft = cards.draft || buildQmdEconomyDraft(domains, facts);
-	const coverage = verifyQmdEconomyCoverage(domains, `${draft}\n${facts.join("\n")}`);
+	const coverage = facts.length || searchResults.trim()
+		? verifyQmdEconomyCoverage(domains, `${draft}\n${facts.join("\n")}\n${searchResults}`)
+		: { complete: false, missing: ["no compact memory evidence loaded"], present: [] };
 	const sources = [...new Set([...cards.sources, ...qmdEconomySources(domains)])];
+	const compactResults = compactSearchResults(searchResults, Math.min(1800, Math.max(600, contextTokenBudget * 2)));
 	const lines = [
-		"## qmd-economy answer plan",
-		"The draft answer is complete. Rewrite/format only. Do not call tools.",
-		`Domain: ${domains.join(", ")}`,
-		`Coverage: ${coverage.complete ? "complete" : `missing ${coverage.missing.join(", ")}`}`,
-		"",
-		"Draft answer:",
+		"## qmd-economy compact memory",
+		"Use this as optional project context, not as the only source of truth.",
+		"If this context is missing, ambiguous, stale, or does not answer the user's intent, continue with the normal coding-agent flow: search memory if useful, then inspect repository files/docs/configs before answering.",
+		"Classify the user's intent semantically in any language; do not rely on English or Portuguese keywords.",
+		`Domain hint: ${domains.join(", ")}`,
+		`Coverage: ${coverage.complete ? "complete" : `incomplete (${coverage.missing.join(", ")})`}`,
+		compactResults ? "\nRelevant memory search results:" : "",
+		compactResults,
+		draft ? "\nDraft/fact-card synthesis:" : "",
 		draft,
-		"",
-		"Required facts:",
+		facts.length ? "\nRequired facts from fact cards:" : "",
 		...facts.map((fact) => `- ${fact}`),
 		sources.length ? `\nSources: ${sources.join(", ")}` : "",
 	].filter(Boolean).join("\n");
@@ -1310,17 +1718,13 @@ function buildQmdEconomyContext(packPath: string, prompt: string): string {
 }
 
 function qmdEconomyFactCardContent(packSlug: string, domain: Exclude<QmdEconomyDomain, "general">): string {
-	const facts = QMD_ECONOMY_DEFAULT_FACTS[domain];
-	const draft = buildQmdEconomyDraft([domain], facts);
-	const sources = qmdEconomySources([domain]);
-	const coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
 	return `---
 type: fact-card
 id: fact-card.${packSlug}.${domain}
 title: ${domain[0].toUpperCase()}${domain.slice(1)} Fact Card
-status: active
+status: draft
 source_of_truth: false
-freshness: current
+freshness: unknown
 tags:
   - pack/${packSlug}
   - agent-memory/fact-card
@@ -1332,19 +1736,17 @@ tags:
 
 ## Coverage
 
-${coverage.complete ? "complete" : `missing ${coverage.missing.join(", ")}`}
+incomplete: no project-specific facts generated yet
 
 ## Draft answer
 
-${draft}
 
 ## Required facts
 
-${facts.map((fact) => `- ${fact}`).join("\n")}
 
 ## Sources
 
-${sources.map((source) => `- \`${source}\``).join("\n") || "- Generated from pack memory"}
+- Run /memctx-pack-enrich to synthesize this card from local memory evidence.
 `;
 }
 
@@ -1446,17 +1848,15 @@ async function synthesizeQmdEconomyFactCardWithQmd(
 		if (grep.text.trim()) evidenceParts.push(`## grep fallback\n${grep.text}`);
 	}
 	const evidence = evidenceParts.join("\n\n");
-	const evidenceFacts = extractQmdEconomyEvidenceFacts(domain, evidence, 8);
-	const defaultFacts = QMD_ECONOMY_DEFAULT_FACTS[domain];
-	let facts = evidenceFacts;
-	let draft = buildQmdEconomyDraft([domain], facts.length ? facts : defaultFacts);
-	let coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
+	const facts = extractQmdEconomyEvidenceFacts(domain, evidence, 8);
+	const draft = buildQmdEconomyDraft([domain], facts);
+	const coverage = verifyQmdEconomyCoverage([domain], `${draft}\n${facts.join("\n")}`);
 	if (facts.length > 0 && coverage.complete) {
 		method = qmdAvailable ? "qmd-search-vsearch-local-synthesis" : "grep-evidence";
+	} else if (facts.length > 0) {
+		method = evidenceParts.length ? "partial-evidence" : "partial-deterministic-fallback";
 	} else {
-		facts = defaultFacts;
-		draft = buildQmdEconomyDraft([domain], facts);
-		method = evidenceParts.length ? "deterministic-fallback-after-incomplete-qmd" : "deterministic-fallback";
+		method = evidenceParts.length ? "no-extractable-facts-from-evidence" : "no-evidence";
 	}
 	const sources = qmdEconomySources([domain]);
 	return { content: qmdEconomyFactCardFromData(packSlug, domain, facts, draft, sources, method), method, evidenceCount: evidenceParts.length };
@@ -1489,7 +1889,7 @@ async function enrichQmdEconomyFactCardsWithQmd(
  */
 export function buildPackContext(packPath: string, searchResults?: string, prompt = ""): string {
 	if (!fs.existsSync(packPath)) return "";
-	if (contextPipeline === "qmd-economy") return buildQmdEconomyContext(packPath, prompt);
+	if (contextPipeline === "qmd-economy") return buildQmdEconomyContext(packPath, prompt, searchResults);
 	const sections: { key: string; header: string; content: string }[] = [];
 	const totalBudgetChars = Math.max(1200, contextTokenBudget * 4);
 	const searchBudgetChars = Math.min(Math.floor(totalBudgetChars * 0.35), 1800);
@@ -2827,6 +3227,9 @@ export function _setQmdAvailable(available: boolean) {
 export function _setStrictMode(enabled: boolean) {
 	strictMode = enabled;
 }
+export function _setContextPipelineForTest(pipeline: ContextPipeline) {
+	contextPipeline = pipeline;
+}
 export function _resetState() {
 	vaultRoot = "";
 	activePack = "";
@@ -2835,8 +3238,9 @@ export function _resetState() {
 	qmdBin = "";
 	qmdStatus = { available: false, source: "missing" };
 	qmdCollection = "";
-	applyMemctxConfig(profileDefaults("auto"));
+	applyMemctxConfig(profileDefaults("gateway"));
 	lastRetrieval = null;
+	lastGatewayDecision = null;
 	lastPackSelection = null;
 	lastPackSwitch = null;
 	llmStats = { mode: llmMode, callsThisSession: 0, estimatedInputChars: 0, estimatedOutputChars: 0 };
@@ -2940,7 +3344,9 @@ export default function (pi: ExtensionAPI) {
 			retrievalTimedOut = retrieval.timedOut;
 		}
 
-		const packContext = buildPackContext(activePackPath, searchResults, event.prompt ?? "");
+		const packContext = ["gateway", "qmd-economy"].includes(contextPipeline)
+			? await buildMemoryGatewayContext(activePackPath, event.prompt ?? "", searchResults, retrievalMode, ctx)
+			: buildPackContext(activePackPath, searchResults, event.prompt ?? "");
 		if (!packContext) return;
 
 		lastRetrieval = {
@@ -2961,13 +3367,8 @@ export default function (pi: ExtensionAPI) {
 			timestamp: nowTimestamp(),
 		};
 
-		const memoryGate = contextPipeline === "qmd-economy"
-			? [
-				"## Memory Gate",
-				"qmd-economy mode: injected draft/facts are the complete answer plan.",
-				"Do not call tools unless the user explicitly asks to inspect current files or facts conflict with user-provided state.",
-				"Never save secrets or sensitive payloads.",
-			].join("\n")
+		const memoryGate = ["gateway", "qmd-economy"].includes(contextPipeline)
+			? ""
 			: [
 				"## Memory Gate",
 				"For project-specific questions:",
@@ -2981,15 +3382,9 @@ export default function (pi: ExtensionAPI) {
 					: "",
 			].filter(Boolean).join("\n");
 
-		const injection = contextPipeline === "qmd-economy"
+		const injection = ["gateway", "qmd-economy"].includes(contextPipeline)
 			? [
-				"\n\n## qmd-economy direct answer plan",
-				`Active pack: \`${activePack}\` · context ~${estimateTokens(packContext)}/${contextTokenBudget} tokens`,
-				"Tool use is forbidden for this turn unless the user explicitly asks to inspect current files or the facts conflict with user-provided state.",
-				"Return the draft answer below, lightly reformatted if needed. Do not call memctx_search, bash, or read.",
-				"",
-				memoryGate,
-				"",
+				"\n\n## pi-memctx Memory Gateway",
 				packContext,
 			].join("\n")
 			: [
@@ -3089,6 +3484,14 @@ export default function (pi: ExtensionAPI) {
 		handler: async (_args: string, ctx: ExtensionContext) => {
 			const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
 			const packFileCount = activePackPath ? scanPackFiles(activePackPath).length : 0;
+			const gatewayStatus = lastGatewayDecision
+				? [
+					`Gateway: ${lastGatewayDecision.status} (${Math.round(lastGatewayDecision.confidence * 100)}%, ${lastGatewayDecision.backend})`,
+					`  candidates: ${lastGatewayDecision.candidateCount}, injected: ${lastGatewayDecision.injected ? "yes" : "no"}`,
+					`  reason: ${lastGatewayDecision.reason || "<none>"}`,
+					`  at: ${lastGatewayDecision.timestamp}`,
+				]
+				: [`Gateway: ${["gateway", "qmd-economy"].includes(contextPipeline) ? "pending" : "off"}`];
 			const retrieval = lastRetrieval
 				? [
 					`Last retrieval: ${lastRetrieval.mode}`,
@@ -3121,6 +3524,7 @@ export default function (pi: ExtensionAPI) {
 				`Auto-switch: ${autoSwitchMode}`,
 				`Retrieval policy: ${retrievalPolicy}`,
 				`Retrieval budget: ${retrievalLatencyBudgetMs}ms`,
+				`Gateway judge: ${gatewayJudgeMode}`,
 				`Context: ${contextPipeline}/${contextMode}, budget ~${contextTokenBudget} tokens, max items ${contextMaxItems}, strip metadata ${contextStripMetadata ? "on" : "off"}`,
 				`Autosave: ${autosaveMode}`,
 				`Autosave low-confidence queue: ${autosaveQueueLowConfidence ? "on" : "off"}`,
@@ -3140,6 +3544,7 @@ export default function (pi: ExtensionAPI) {
 				`LLM last decision: ${llmStats.lastDecision ?? "<none>"}`,
 				`LLM chars: in ${llmStats.estimatedInputChars}, out ${llmStats.estimatedOutputChars}`,
 				`LLM error: ${llmStats.lastError ?? "<none>"}`,
+				...gatewayStatus,
 				...retrieval,
 			];
 			ctx.ui.notify(lines.join("\n"), "info");
@@ -3153,15 +3558,15 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-profile command: apply zero-config behavior profiles ---
 	pi.registerCommand("memctx-profile", {
-		description: "Apply a memory behavior profile. Usage: /memctx-profile [auto|low|balanced|full|qmd-economy|status]",
+		description: "Apply a memory gateway profile. Usage: /memctx-profile [gateway-lite|gateway|gateway-full|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
-			if (["low", "balanced", "auto", "full", "qmd-economy"].includes(target)) {
+			if (["gateway-lite", "gateway", "gateway-full"].includes(target)) {
 				const config = profileDefaults(target as Exclude<MemctxProfile, "custom">);
 				applyMemctxConfig(config);
 				writeMemctxConfig(config);
 			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-profile [auto|low|balanced|full|qmd-economy|status]", "error");
+				ctx.ui.notify("memctx: Usage: /memctx-profile [gateway-lite|gateway|gateway-full|status]", "error");
 				return;
 			}
 			ctx.ui.notify([
@@ -3171,6 +3576,7 @@ export default function (pi: ExtensionAPI) {
 				`autosave: ${autosaveMode}`,
 				`llm: ${llmMode}`,
 				`auto-switch: ${autoSwitchMode}`,
+				`gateway judge: ${gatewayJudgeMode}`,
 				`auto-bootstrap: ${autoBootstrapMode}`,
 			].join("\n"), "info");
 			ctx.ui.setStatus("memctx", buildStatusText());
@@ -3183,10 +3589,10 @@ export default function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
 			if (target === "reset") {
-				const config = profileDefaults("auto");
+				const config = profileDefaults("gateway");
 				applyMemctxConfig(config);
 				writeMemctxConfig(config);
-				ctx.ui.notify("memctx: Config reset to profile:auto.", "info");
+				ctx.ui.notify("memctx: Config reset to profile:gateway.", "info");
 				ctx.ui.setStatus("memctx", buildStatusText());
 				return;
 			}
@@ -3574,7 +3980,7 @@ export default function (pi: ExtensionAPI) {
 		name: "memctx_search",
 		label: "Memory Search",
 		description: [
-			"Search across memory context pack files for relevant context.",
+			"Search across memory context pack files for relevant context. Do not use when the injected Memory Gateway Brief says Status: sufficient; in that case answer from the brief.",
 			"Modes:",
 			"- 'keyword' (default, fast): BM25 text search. Best for specific terms, tags, note names.",
 			"- 'semantic' (~2s): Meaning-based search. Finds related concepts with different wording.",
@@ -3591,6 +3997,16 @@ export default function (pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Max results (default: 5)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+			if ((baseProfile === "gateway-lite" || baseProfile === "gateway-full") && contextPipeline === "gateway" && lastGatewayDecision?.status === "sufficient" && lastGatewayDecision.injected) {
+				return {
+					content: [{
+						type: "text" as const,
+						text: "Memory Gateway already injected sufficient memory for the current prompt. Do not search again; answer from the Memory Gateway Brief unless the user explicitly asks for different/additional memory.",
+					}],
+					details: { skipped: true, reason: "gateway-sufficient", status: lastGatewayDecision.status },
+				};
+			}
+
 			if (!activePackPath) {
 				return {
 					content: [{ type: "text" as const, text: "No active memory pack. Install a pack under packs/ first." }],

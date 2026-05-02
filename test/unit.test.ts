@@ -14,6 +14,7 @@ import * as path from "node:path";
 import {
 	_resetState,
 	_setActivePack,
+	_setContextPipelineForTest,
 	_setQmdAvailable,
 	_setStrictMode,
 	_setVaultRoot,
@@ -24,6 +25,7 @@ import {
 	detectActivePack,
 	findVaultRoot,
 	generatePackFromDirectory,
+	grepSearchPack,
 	listPacks,
 	nowTimestamp,
 	readFileSafe,
@@ -680,7 +682,10 @@ describe("truncate", () => {
 // ==========================================================================
 
 describe("buildPackContext", () => {
-	beforeEach(setupTmpDir);
+	beforeEach(() => {
+		setupTmpDir();
+		_setContextPipelineForTest("compact");
+	});
 	afterEach(cleanupTmpDir);
 
 	test("returns empty string for non-existent pack", () => {
@@ -703,9 +708,7 @@ describe("buildPackContext", () => {
 		expect(context).toContain("Active Decisions");
 		expect(context).toContain("Bun");
 
-		// Should contain actions
-		expect(context).toContain("Recent Actions");
-		expect(context).toContain("CI");
+		// Actions are lower priority and may be trimmed under gateway-era compact budgets.
 
 		// Should contain runbooks
 		expect(context).toContain("Runbooks");
@@ -757,6 +760,54 @@ describe("buildPackContext", () => {
 
 		const context = buildPackContext(packPath);
 		expect(context).toBe("");
+	});
+
+	test("qmd-economy uses retrieved memory and does not inject canned project facts", () => {
+		const { packPath } = createTestVault();
+		_setContextPipelineForTest("qmd-economy");
+
+		const context = buildPackContext(
+			packPath,
+			"The service builds Lambda ZIP files, uploads them to S3, and opens an IaC PR that Terraform applies.",
+			"这个项目的 Lambda 版本部署是怎么工作的？",
+		);
+
+		expect(context).toContain("qmd-economy compact memory");
+		expect(context).toContain("Lambda ZIP");
+		expect(context).toContain("Terraform applies");
+		expect(context).toContain("semantically in any language");
+		expect(context).not.toContain("ArgoCD syncs the Helm chart");
+		expect(context).not.toContain("Deploy gateway to production");
+	});
+
+	test("qmd-economy ignores stale fact card when prompt has a more specific technical anchor", () => {
+		const { packPath } = createTestVault();
+		_setContextPipelineForTest("qmd-economy");
+		fs.mkdirSync(path.join(packPath, "00-system", "fact-cards"), { recursive: true });
+		fs.writeFileSync(path.join(packPath, "00-system", "fact-cards", "deploy.md"), `---\ntype: fact-card\n---\n# Deploy Fact Card\n\n## Draft answer\n\nDeploy gateway to production with ArgoCD syncs the Helm chart.\n\n## Required facts\n\n- ArgoCD syncs the Helm chart to Kubernetes.\n`);
+
+		const context = buildPackContext(
+			packPath,
+			"Lambda artifacts are ZIP files in S3 and Terraform applies lambda-artifacts.auto.tfvars.json.",
+			"como funciona o deploy de versão dos lambdas no projeto?",
+		);
+
+		expect(context).toContain("Lambda artifacts");
+		expect(context).toContain("lambda-artifacts.auto.tfvars.json");
+		expect(context).not.toContain("Deploy gateway to production");
+		expect(context).not.toContain("ArgoCD syncs the Helm chart");
+	});
+
+	test("grep fallback ranks specific technical anchors above generic deploy notes", () => {
+		const { packPath } = createTestVault();
+		fs.writeFileSync(path.join(packPath, "70-runbooks", "generic-deploy.md"), "# Deploy\n\nDeploy gateway with Helm and ArgoCD.");
+		fs.writeFileSync(path.join(packPath, "20-context", "lambda-release.md"), "# Lambda release\n\nLambda ZIP artifacts go to S3. Terraform applies lambda-artifacts.auto.tfvars.json for version rollout.");
+
+		const result = grepSearchPack(packPath, "como funciona o deploy de versão dos lambdas no projeto?", 2);
+
+		expect(result.text).toContain("20-context/lambda-release.md");
+		expect(result.text).toContain("lambda-artifacts.auto.tfvars.json");
+		expect(result.text).not.toContain("70-runbooks/generic-deploy.md");
 	});
 });
 
@@ -1003,9 +1054,8 @@ describe("before_agent_start context injection", () => {
 
 		expect(result).toBeDefined();
 		expect(result.systemPrompt).toContain("You are helpful.");
-		expect(result.systemPrompt).toContain("Memory Context");
-		expect(result.systemPrompt).toContain("test-pack");
-		expect(result.systemPrompt).toContain("TypeScript");
+		expect(result.systemPrompt).toContain("pi-memctx Memory Gateway");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 	});
 
 	test("includes memctx_search tool hint in injection", async () => {
@@ -1019,7 +1069,7 @@ describe("before_agent_start context injection", () => {
 			createMockCtx(),
 		)) as any;
 
-		expect(result.systemPrompt).toContain("memctx_search");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 	});
 
 	test("uses grep fallback retrieval during context injection when qmd is unavailable", async () => {
@@ -1034,8 +1084,7 @@ describe("before_agent_start context injection", () => {
 			createMockCtx(),
 		)) as any;
 
-		expect(result.systemPrompt).toContain("Retrieval: grep-fallback");
-		expect(result.systemPrompt).toContain("Relevant Memory");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 		expect(result.systemPrompt).toContain("PostgreSQL");
 	});
 
@@ -1051,8 +1100,27 @@ describe("before_agent_start context injection", () => {
 			createMockCtx(),
 		)) as any;
 
-		expect(result.systemPrompt).toContain("Memory Gate");
-		expect(result.systemPrompt).toContain("Strict mode is ON");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
+	});
+
+	test("qmd-economy routing permits multilingual memory search and workspace inspection", async () => {
+		const { packPath } = createTestVault();
+		const { pi, hooks } = createMockPi();
+		registerExtension(pi as any);
+		_setActivePack("test-pack", packPath);
+		_setContextPipelineForTest("qmd-economy");
+
+		const result = (await hooks["before_agent_start"](
+			{ prompt: "这个项目是怎么部署的？", systemPrompt: "" },
+			createMockCtx(),
+		)) as any;
+
+		expect(result.systemPrompt).toContain("pi-memctx Memory Gateway");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
+		expect(result.systemPrompt).toContain("inspect repo/docs/workflows");
+		expect(result.systemPrompt).toContain("Memory Gateway Brief");
+		expect(result.systemPrompt).not.toContain("Tool use is forbidden");
+		expect(result.systemPrompt).not.toContain("Do not call memctx_search, bash, or read");
 	});
 });
 
