@@ -58,34 +58,11 @@ profile_config() {
   local profile="$1"
   local config_path="$2"
   case "$profile" in
-    gateway)
+    gateway|gateway-lite|gateway-full|qmd-economy)
       cat > "$config_path" <<'JSON'
 {
   "profile": "gateway",
   "baseProfile": "gateway",
-  "strict": false,
-  "retrieval": "balanced",
-  "retrievalLatencyBudgetMs": 1200,
-  "autosave": "auto",
-  "autosaveQueueLowConfidence": false,
-  "llm": "assist",
-  "autoSwitch": "cwd",
-  "autoBootstrap": "ask",
-  "startupDoctor": "off",
-  "toolFailureHints": true,
-  "contextMode": "compact",
-  "contextPipeline": "gateway",
-  "contextTokenBudget": 750,
-  "contextMaxItems": 10,
-  "contextStripMetadata": true
-}
-JSON
-      ;;
-    gateway-lite)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "gateway-lite",
-  "baseProfile": "gateway-lite",
   "strict": false,
   "retrieval": "balanced",
   "retrievalLatencyBudgetMs": 800,
@@ -104,33 +81,7 @@ JSON
 }
 JSON
       ;;
-    gateway-full)
-      cat > "$config_path" <<'JSON'
-{
-  "profile": "gateway-full",
-  "baseProfile": "gateway-full",
-  "strict": false,
-  "retrieval": "balanced",
-  "retrievalLatencyBudgetMs": 1200,
-  "autosave": "auto",
-  "autosaveQueueLowConfidence": false,
-  "llm": "assist",
-  "autoSwitch": "cwd",
-  "autoBootstrap": "ask",
-  "startupDoctor": "off",
-  "toolFailureHints": true,
-  "contextMode": "compact",
-  "contextPipeline": "gateway",
-  "contextTokenBudget": 900,
-  "contextMaxItems": 14,
-  "contextStripMetadata": true
-}
-JSON
-      ;;
-    qmd-economy)
-      profile_config "gateway-lite" "$config_path"
-      ;;
-    *) echo "Unknown profile for benchmark: $profile (supported: baseline gateway-lite gateway gateway-full)" >&2; return 1 ;;
+    *) echo "Unknown profile for benchmark: $profile (supported: baseline gateway)" >&2; return 1 ;;
   esac
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-memctx",
-  "version": "0.7.2",
+  "version": "0.8.0",
   "description": "Automatic memory context injection for pi coding agent. Load, search, and persist knowledge across sessions using Markdown packs.",
   "keywords": [
     "pi-package",

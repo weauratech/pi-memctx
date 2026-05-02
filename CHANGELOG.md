@@ -7,6 +7,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.8.0] - 2026-05-02
+
+### Changed
+
+- Simplified pi-memctx to a single recommended `gateway` profile, with old profile names compatibility-mapped to `gateway`.
+- Reworked the status overlay to show user-facing runtime information: active pack, gateway state, memory hits, search backend, profile, and learning mode.
+- Updated README benchmark docs to compare only baseline vs `gateway`.
+
+
 ## [0.7.2] - 2026-05-02
 
 ### Fixed

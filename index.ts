@@ -84,7 +84,7 @@ type AutoSwitchMode = "off" | "cwd" | "prompt" | "all";
 type LlmMode = "off" | "assist" | "first";
 type RetrievalPolicy = "auto" | "fast" | "balanced" | "deep" | "strict";
 type AutosaveMode = "off" | "suggest" | "confirm" | "auto";
-type MemctxProfile = "gateway-lite" | "gateway" | "gateway-full" | "custom";
+type MemctxProfile = "gateway" | "custom";
 type AutoBootstrapMode = "off" | "ask" | "on";
 type StartupDoctorMode = "off" | "light" | "full";
 type ContextMode = "raw" | "compact";
@@ -290,25 +290,21 @@ function memctxConfigPath(): string {
 
 function profileDefaults(profile: Exclude<MemctxProfile, "custom">): MemctxConfig {
 	const base: Record<Exclude<MemctxProfile, "custom">, MemctxConfig> = {
-		"gateway-lite": { profile: "gateway-lite", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 800, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
-		gateway: { profile: "gateway", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 1000, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "light", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 750, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
-		"gateway-full": { profile: "gateway-full", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 1200, autosave: "auto", autosaveQueueLowConfidence: false, llm: "assist", autoSwitch: "all", autoBootstrap: "ask", startupDoctor: "full", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 900, contextMaxItems: 14, contextStripMetadata: true, contextPipeline: "gateway" },
+		gateway: { profile: "gateway", strict: false, retrieval: "balanced", retrievalLatencyBudgetMs: 800, autosave: "off", autosaveQueueLowConfidence: false, llm: "off", autoSwitch: "cwd", autoBootstrap: "ask", startupDoctor: "off", toolFailureHints: true, contextMode: "compact", contextTokenBudget: 650, contextMaxItems: 10, contextStripMetadata: true, contextPipeline: "gateway" },
 	};
 	return { ...base[profile], baseProfile: profile };
 }
 
 function normalizeProfileName(value: unknown): MemctxProfile {
 	const name = String(value ?? "gateway").toLowerCase();
-	if (["gateway-lite", "gateway", "gateway-full", "custom"].includes(name)) return name as MemctxProfile;
-	// Retired profile compatibility: old modes route to the closest gateway profile.
-	if (["low", "qmd-economy"].includes(name)) return "gateway-lite";
-	if (["full"].includes(name)) return "gateway-full";
-	if (["balanced", "auto"].includes(name)) return "gateway";
+	if (["gateway", "custom"].includes(name)) return name as MemctxProfile;
+	// Retired profile compatibility: all old modes now route to the single gateway profile.
+	if (["gateway-lite", "gateway-full", "low", "balanced", "auto", "full", "qmd-economy"].includes(name)) return "gateway";
 	return "gateway";
 }
 
 function isRetiredProfileName(value: unknown): boolean {
-	return ["low", "balanced", "auto", "full", "qmd-economy"].includes(String(value ?? "").toLowerCase());
+	return ["gateway-lite", "gateway-full", "low", "balanced", "auto", "full", "qmd-economy"].includes(String(value ?? "").toLowerCase());
 }
 
 function readMemctxConfig(): MemctxConfig {
@@ -356,7 +352,7 @@ function applyMemctxConfig(config: MemctxConfig) {
 	contextMaxItems = envOrConfig(process.env.MEMCTX_CONTEXT_MAX_ITEMS, parsePositiveIntEnv(process.env.MEMCTX_CONTEXT_MAX_ITEMS, 6), config.contextMaxItems);
 	contextStripMetadata = envOrConfig(process.env.MEMCTX_CONTEXT_STRIP_METADATA, parseBooleanDefaultTrue(process.env.MEMCTX_CONTEXT_STRIP_METADATA), config.contextStripMetadata);
 	contextPipeline = envOrConfig(process.env.MEMCTX_CONTEXT_PIPELINE, parseContextPipeline(process.env.MEMCTX_CONTEXT_PIPELINE), config.contextPipeline);
-	gatewayJudgeMode = envOrConfig(process.env.MEMCTX_GATEWAY_JUDGE, parseGatewayJudgeMode(process.env.MEMCTX_GATEWAY_JUDGE), baseProfile === "gateway" ? "auto" : "conservative");
+	gatewayJudgeMode = envOrConfig(process.env.MEMCTX_GATEWAY_JUDGE, parseGatewayJudgeMode(process.env.MEMCTX_GATEWAY_JUDGE), "conservative");
 	llmStats.mode = llmMode;
 }
 
@@ -1239,13 +1235,19 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 }
 
 function buildStatusText(): string {
-	const retrieval = lastRetrieval ? `${lastRetrieval.mode}:${lastRetrieval.resultCount}${lastRetrieval.timedOut ? ":timeout" : ""}` : "idle";
 	const gateway = lastGatewayDecision
-		? `${lastGatewayDecision.status}${lastGatewayDecision.injected ? ":inject" : ":pass"}@${lastGatewayDecision.backend}`
-		: contextPipeline === "gateway" || contextPipeline === "qmd-economy" ? "pending" : "off";
-	const qmd = qmdStatus.available ? `qmd:${qmdStatus.source}` : "grep";
-	const ctxBudget = `${contextPipeline}:${contextTokenBudget}t`;
-	return `🧠 ${activePack || "none"} · gw:${gateway} · mem:${retrieval} · ${qmd} · ctx:${ctxBudget} · save:${autosaveMode} · strict:${strictMode ? "on" : "off"} · llm:${llmMode}${llmStats.callsThisSession ? `(${llmStats.callsThisSession})` : ""}`;
+		? lastGatewayDecision.status === "sufficient" && lastGatewayDecision.injected ? "memory ready"
+			: lastGatewayDecision.status === "partial" && lastGatewayDecision.injected ? "memory partial"
+				: lastGatewayDecision.status === "conflicting" ? "check source"
+					: "repo fallback"
+		: contextPipeline === "gateway" || contextPipeline === "qmd-economy" ? "ready" : "off";
+	const memory = lastRetrieval
+		? lastRetrieval.timedOut ? `search timeout (${lastRetrieval.resultCount})`
+			: `${lastRetrieval.resultCount} memory hit${lastRetrieval.resultCount === 1 ? "" : "s"}`
+		: "idle";
+	const search = qmdStatus.available ? "qmd" : "grep fallback";
+	const save = autosaveMode === "off" ? "learn off" : autosaveMode === "auto" ? "learn auto" : `learn ${autosaveMode}`;
+	return `🧠 ${activePack || "no pack"} · ${gateway} · ${memory} · search:${search} · profile:gateway · ${save}`;
 }
 
 function isNoResultText(text: string): boolean {
@@ -3567,15 +3569,15 @@ export default function (pi: ExtensionAPI) {
 
 	// --- /memctx-profile command: apply zero-config behavior profiles ---
 	pi.registerCommand("memctx-profile", {
-		description: "Apply a memory gateway profile. Usage: /memctx-profile [gateway-lite|gateway|gateway-full|status]",
+		description: "Apply the memory gateway profile. Usage: /memctx-profile [gateway|status]",
 		handler: async (args, ctx) => {
 			const target = (args ?? "status").trim().toLowerCase();
-			if (["gateway-lite", "gateway", "gateway-full"].includes(target)) {
-				const config = profileDefaults(target as Exclude<MemctxProfile, "custom">);
+			if (["gateway", "gateway-lite", "gateway-full"].includes(target)) {
+				const config = profileDefaults("gateway");
 				applyMemctxConfig(config);
 				writeMemctxConfig(config);
 			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-profile [gateway-lite|gateway|gateway-full|status]", "error");
+				ctx.ui.notify("memctx: Usage: /memctx-profile [gateway|status]", "error");
 				return;
 			}
 			ctx.ui.notify([
@@ -4006,7 +4008,8 @@ export default function (pi: ExtensionAPI) {
 			limit: Type.Optional(Type.Number({ description: "Max results (default: 5)" })),
 		}),
 		async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-			if ((baseProfile === "gateway-lite" || baseProfile === "gateway-full") && contextPipeline === "gateway" && lastGatewayDecision?.status === "sufficient" && lastGatewayDecision.injected) {
+			const sameAsInjectedPrompt = lastRetrieval?.prompt && normalizeSearchText(params.query).includes(normalizeSearchText(lastRetrieval.prompt));
+			if (sameAsInjectedPrompt && baseProfile === "gateway" && contextPipeline === "gateway" && lastGatewayDecision?.status === "sufficient" && lastGatewayDecision.injected) {
 				return {
 					content: [{
 						type: "text" as const,

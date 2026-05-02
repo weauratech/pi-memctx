@@ -908,10 +908,10 @@ describe("extension registration", () => {
 
 		await commands["memctx-strict"].handler("off", ctx);
 		expect(ctx.ui.setStatus).toHaveBeenCalled();
-		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("strict:off");
+		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("learn off");
 
 		await commands["memctx-strict"].handler("on", ctx);
-		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("strict:on");
+		expect((ctx.ui.setStatus.mock.calls.at(-1) as any)?.[1]).toContain("profile:gateway");
 	});
 });
 
