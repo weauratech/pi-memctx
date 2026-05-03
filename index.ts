@@ -4541,7 +4541,6 @@ export default function (pi: ExtensionAPI) {
 		if (savedItems.length > 0 && ctx.hasUI) {
 			const visibleSavedItems = uniqueSavedMemoryItems(savedItems);
 			const lines = visibleSavedItems.map((item) => `   - ${item.type}: ${memoryWikilink(item.rel, item.title)} (${item.action})`);
-			ctx.ui.notify([`memctx: learned ${visibleSavedItems.length} memor${visibleSavedItems.length === 1 ? "y" : "ies"}:`, ...lines].join("\n"), "info");
 			ctx.ui.setWidget("memctx-learned", [
 				`\x1b[32m🧠 memctx learned ${visibleSavedItems.length} memor${visibleSavedItems.length === 1 ? "y" : "ies"}\x1b[0m`,
 				...lines,

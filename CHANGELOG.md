@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.11.1] - 2026-05-03
+
+### Fixed
+
+- Avoid duplicating the learned-memory post-turn UI by showing only the emoji widget summary.
+
+
 ## [0.11.0] - 2026-05-03
 
 ### Changed
