@@ -108,6 +108,16 @@ type PackSwitch = {
 	timestamp: string;
 };
 
+type WorkspaceMap = {
+	version: 1;
+	workspaces: Array<{
+		path: string;
+		pack: string;
+		createdAt: string;
+		lastUsedAt: string;
+	}>;
+};
+
 type LlmStats = {
 	mode: LlmMode;
 	callsThisSession: number;
@@ -559,15 +569,80 @@ export function detectBestPackForCwd(packsDir: string, cwd: string): PackMatch |
 	return matches[0]?.score ? matches[0] : null;
 }
 
+function workspaceMapPathForPacksDir(packsDir: string): string {
+	return path.join(path.dirname(packsDir), "00-system", "workspace-map.json");
+}
+
+function loadWorkspaceMap(packsDir: string): WorkspaceMap {
+	const raw = readFileSafe(workspaceMapPathForPacksDir(packsDir));
+	if (!raw) return { version: 1, workspaces: [] };
+	try {
+		const parsed = JSON.parse(raw) as WorkspaceMap;
+		return { version: 1, workspaces: Array.isArray(parsed.workspaces) ? parsed.workspaces : [] };
+	} catch {
+		return { version: 1, workspaces: [] };
+	}
+}
+
+function saveWorkspaceMap(packsDir: string, map: WorkspaceMap): void {
+	const file = workspaceMapPathForPacksDir(packsDir);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, JSON.stringify({ version: 1, workspaces: map.workspaces }, null, 2) + "\n", "utf-8");
+}
+
+function rememberWorkspaceMemory(packsDir: string, workspacePath: string, pack: string): void {
+	const resolved = path.resolve(workspacePath);
+	const now = nowTimestamp();
+	const map = loadWorkspaceMap(packsDir);
+	const existing = map.workspaces.find((item) => path.resolve(item.path) === resolved);
+	if (existing) {
+		existing.pack = pack;
+		existing.lastUsedAt = now;
+	} else {
+		map.workspaces.push({ path: resolved, pack, createdAt: now, lastUsedAt: now });
+	}
+	map.workspaces.sort((a, b) => b.path.length - a.path.length || a.path.localeCompare(b.path));
+	saveWorkspaceMap(packsDir, map);
+}
+
+function detectWorkspacePackForCwd(packsDir: string, cwd: string): PackMatch | null {
+	const cwdResolved = path.resolve(cwd);
+	const packs = new Set(listPacks(packsDir));
+	for (const item of loadWorkspaceMap(packsDir).workspaces.sort((a, b) => b.path.length - a.path.length)) {
+		const workspacePath = path.resolve(item.path);
+		if (!packs.has(item.pack)) continue;
+		if (cwdResolved === workspacePath || cwdResolved.startsWith(`${workspacePath}${path.sep}`)) {
+			return {
+				pack: item.pack,
+				packPath: path.join(packsDir, item.pack),
+				score: 120,
+				confidence: "high",
+				reasons: [`cwd matched workspace memory ${workspacePath}`],
+			};
+		}
+	}
+	return null;
+}
+
 export function detectActivePack(packsDir: string, cwd?: string): string | null {
 	const packs = listPacks(packsDir);
 	if (packs.length === 0) return null;
+
+	if (cwd) {
+		const workspaceMatch = detectWorkspacePackForCwd(packsDir, cwd);
+		if (workspaceMatch) {
+			lastPackSelection = workspaceMatch;
+			rememberWorkspaceMemory(packsDir, cwd, workspaceMatch.pack);
+			return workspaceMatch.pack;
+		}
+	}
 	if (packs.length === 1) return packs[0];
 
 	if (cwd) {
 		const match = detectBestPackForCwd(packsDir, cwd);
 		if (match) {
 			lastPackSelection = match;
+			rememberWorkspaceMemory(packsDir, cwd, match.pack);
 			return match.pack;
 		}
 	}
@@ -1358,9 +1433,9 @@ function buildStatusText(): string {
 		? lastRetrieval.timedOut ? `search timeout (${lastRetrieval.resultCount})`
 			: `${lastRetrieval.resultCount} memory hit${lastRetrieval.resultCount === 1 ? "" : "s"}`
 		: "idle";
-	const search = qmdStatus.available ? "qmd" : "grep fallback";
+	const search = qmdStatus.available ? "qmd" : "grep";
 	const save = autosaveMode === "off" ? "learn off" : autosaveMode === "auto" ? "learn auto" : `learn ${autosaveMode}`;
-	return `🧠 ${activePack || "no pack"} · ${gateway} · ${memory} · search:${search} · profile:gateway · ${save}`;
+	return `🧠 ${activePack || "no memory"} · ${gateway} · ${memory} · ${search} · ${save}`;
 }
 
 function isNoResultText(text: string): boolean {
@@ -1870,7 +1945,7 @@ incomplete: no project-specific facts generated yet
 
 ## Sources
 
-- Run /memctx-pack-enrich to synthesize this card from local memory evidence.
+- Run /memctx-refresh to synthesize this card from local memory evidence.
 `;
 }
 
@@ -3705,11 +3780,11 @@ async function maybeBootstrapPack(ctx: ExtensionContext, packsDir: string): Prom
 		ctx.cwd,
 		"",
 		`Create and map a new pack named \"${slug}\" now?`,
-		"Choose No if you prefer to run /memctx-pack-generate later.",
+		"Choose No if you prefer to run /memctx-init later.",
 	].join("\n");
 	const confirmed = autoBootstrapMode === "on" ? await ctx.ui.confirm("Create memory pack?", message) : await ctx.ui.confirm("Create memory pack?", message);
 	if (!confirmed) {
-		ctx.ui.notify("memctx: Pack bootstrap skipped. Run /memctx-pack-generate when you want to create one.", "info");
+		ctx.ui.notify("memctx: Workspace memory setup skipped. Run /memctx-init when you want to create it.", "info");
 		return false;
 	}
 	fs.mkdirSync(packsDir, { recursive: true });
@@ -3780,7 +3855,7 @@ export default function (pi: ExtensionAPI) {
 			} else {
 				if (ctx.hasUI) {
 					ctx.ui.notify(
-						"memctx: No packs found. Run /memctx-pack-generate to create one, or set MEMCTX_PACKS_PATH.",
+						"memctx: No workspace memory found. Run /memctx-init to create one, or set MEMCTX_PACKS_PATH.",
 						"info",
 					);
 				}
@@ -3996,275 +4071,174 @@ export default function (pi: ExtensionAPI) {
 		// Nothing to flush at the moment
 	});
 
-	// --- /memctx-pack-status command: show active pack and retrieval state ---
-	const packStatusCommand = {
-		description: "Show active memory pack, qmd, retrieval, strict-mode, and LLM status. Usage: /memctx-pack-status",
-		handler: async (_args: string, ctx: ExtensionContext) => {
-			const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
-			const packFileCount = activePackPath ? scanPackFiles(activePackPath).length : 0;
-			const gatewayStatus = lastGatewayDecision
-				? [
-					`Gateway: ${lastGatewayDecision.status} (${Math.round(lastGatewayDecision.confidence * 100)}%, ${lastGatewayDecision.backend})`,
-					`  candidates: ${lastGatewayDecision.candidateCount}, injected: ${lastGatewayDecision.injected ? "yes" : "no"}`,
-					`  reason: ${lastGatewayDecision.reason || "<none>"}`,
-					`  at: ${lastGatewayDecision.timestamp}`,
-				]
-				: [`Gateway: ${["gateway", "qmd-economy"].includes(contextPipeline) ? "pending" : "off"}`];
-			const retrieval = lastRetrieval
-				? [
-					`Last retrieval: ${lastRetrieval.mode}`,
-					`  policy: ${lastRetrieval.policy}`,
-					`  query: ${lastRetrieval.query || "<none>"}`,
-					`  queries: ${lastRetrieval.queries.join(" | ") || "<none>"}`,
-					`  results: ${lastRetrieval.resultCount}`,
-					`  duration: ${lastRetrieval.durationMs}ms / ${lastRetrieval.budgetMs}ms${lastRetrieval.timedOut ? " (budget reached)" : ""}`,
-					`  context: ${lastRetrieval.contextMode ?? contextMode}, ~${lastRetrieval.contextEstimatedTokens ?? 0}/${lastRetrieval.contextBudgetTokens ?? contextTokenBudget} tokens (${lastRetrieval.contextChars ?? 0} chars)`,
-					`  cross-pack hits: ${lastRetrieval.crossPackHits.join(", ") || "<none>"}`,
-					`  at: ${lastRetrieval.timestamp}`,
-				]
-				: ["Last retrieval: none"];
-			const selection = lastPackSelection
-				? [
-					`Selection: ${lastPackSelection.confidence} (${lastPackSelection.score})`,
-					`  reasons: ${lastPackSelection.reasons.join("; ") || "<none>"}`,
-				]
-				: ["Selection: <none>"];
-			const switchLines = lastPackSwitch
-				? [`Last switch: ${lastPackSwitch.from || "<none>"} → ${lastPackSwitch.to}`, `  reason: ${lastPackSwitch.reason}`, `  at: ${lastPackSwitch.timestamp}`]
-				: ["Last switch: none"];
-			const lines = [
-				`Profile: ${currentProfile}${currentProfile === "custom" ? ` (base ${baseProfile})` : ""}`,
-				`Config path: ${memctxConfigPath()}`,
-				`Active pack: ${activePack || "<none>"}`,
+	function workspaceStatusLines(ctx: ExtensionContext, advanced = false): string[] {
+		const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : resolvePacksDir(ctx.cwd) || "");
+		const packFileCount = activePackPath ? scanPackFiles(activePackPath).length : 0;
+		const memoryState = activePack ? "ready" : "not initialized";
+		const search = qmdStatus.available ? `qmd (${qmdStatus.source})` : "grep fallback";
+		const learning = autosaveMode === "off" ? "off" : autosaveMode === "auto" ? "auto" : autosaveMode;
+		const lines = [
+			"🧠 Workspace memory",
+			`Status: ${memoryState}`,
+			`Workspace: ${ctx.cwd}`,
+			`Memory: ${activePack || "<none>"}`,
+			`Search: ${search}`,
+			`Learning: ${learning}`,
+			`Markdown files: ${packFileCount}`,
+			lastRetrieval ? `Last retrieval: ${lastRetrieval.resultCount} hit${lastRetrieval.resultCount === 1 ? "" : "s"} via ${lastRetrieval.mode}` : "Last retrieval: none",
+			lastGatewayDecision ? `Last gateway: ${lastGatewayDecision.status}${lastGatewayDecision.injected ? " (injected)" : ""}` : "Last gateway: pending",
+		];
+		if (advanced) {
+			lines.push(
+				"",
+				"Advanced:",
 				`Pack path: ${activePackPath || "<none>"}`,
 				`Packs dir: ${packsDir || "<none>"}`,
-				`Pack files: ${packFileCount} markdown files`,
-				`Auto-switch: ${autoSwitchMode}`,
-				`Retrieval policy: ${retrievalPolicy}`,
-				`Retrieval budget: ${retrievalLatencyBudgetMs}ms`,
+				`Workspace map: ${packsDir ? workspaceMapPathForPacksDir(packsDir) : "<none>"}`,
+				`Profile: ${currentProfile}${currentProfile === "custom" ? ` (base ${baseProfile})` : ""}`,
+				`Retrieval: ${retrievalPolicy} (${retrievalLatencyBudgetMs}ms)`,
 				`Gateway judge: ${gatewayJudgeMode}`,
-				`Context: ${contextPipeline}/${contextMode}, budget ~${contextTokenBudget} tokens, max items ${contextMaxItems}, strip metadata ${contextStripMetadata ? "on" : "off"}`,
-				`Autosave: ${autosaveMode}`,
-				`Autosave low-confidence queue: ${autosaveQueueLowConfidence ? "on" : "off"}`,
+				`Context: ${contextPipeline}/${contextMode}, ~${contextTokenBudget} tokens, ${contextMaxItems} items`,
 				`Save queue: ${readSaveQueue().length} pending`,
-				...selection,
-				...switchLines,
-				`qmd: ${qmdStatus.available ? "available" : "unavailable"}`,
-				`qmd source: ${qmdStatus.source}`,
 				`qmd bin: ${qmdStatus.bin ?? "<none>"}`,
 				`qmd version: ${qmdStatus.version ?? "<unknown>"}`,
 				`qmd error: ${qmdStatus.error ?? "<none>"}`,
-				`qmd collection: ${qmdCollection || "<none>"}`,
-				`Strict mode: ${strictMode ? "on" : "off"}`,
-				`LLM mode: ${llmMode}`,
-				`LLM calls: ${llmStats.callsThisSession}`,
-				`LLM last use: ${llmStats.lastUseCase ?? "<none>"}`,
-				`LLM last decision: ${llmStats.lastDecision ?? "<none>"}`,
-				`LLM chars: in ${llmStats.estimatedInputChars}, out ${llmStats.estimatedOutputChars}`,
-				`LLM error: ${llmStats.lastError ?? "<none>"}`,
-				...gatewayStatus,
-				...retrieval,
-			];
-			ctx.ui.notify(lines.join("\n"), "info");
-		},
-	};
-	pi.registerCommand("memctx-pack-status", packStatusCommand);
-	pi.registerCommand("pack-status", {
-		...packStatusCommand,
-		description: "Deprecated alias for /memctx-pack-status.",
-	});
+			);
+		}
+		return lines;
+	}
 
-	// --- /memctx-profile command: apply zero-config behavior profiles ---
-	pi.registerCommand("memctx-profile", {
-		description: "Apply the memory gateway profile. Usage: /memctx-profile [gateway|status]",
-		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			if (["gateway", "gateway-lite", "gateway-full"].includes(target)) {
-				const config = profileDefaults("gateway");
-				applyMemctxConfig(config);
-				writeMemctxConfig(config);
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-profile [gateway|status]", "error");
-				return;
+	async function refreshWorkspaceMemory(scanDir: string, ctx: ExtensionCommandContext, noDeep = false): Promise<void> {
+		if (!activePackPath || !activePack) {
+			ctx.ui.notify("memctx: No workspace memory found. Run /memctx-init first.", "error");
+			return;
+		}
+		if (packEnrichRunning) {
+			ctx.ui.notify("memctx: Memory refresh is already running in the background.", "warning");
+			return;
+		}
+		if (!fs.existsSync(scanDir)) {
+			ctx.ui.notify(`memctx: Workspace path not found: ${scanDir}`, "error");
+			return;
+		}
+		const pack = activePack;
+		const packPath = activePackPath;
+		const collection = qmdCollection;
+		const useLlm = !noDeep && !!ctx.model;
+		const started = Date.now();
+		packEnrichRunning = true;
+		ctx.ui.notify(`memctx: Refreshing workspace memory in background.\nWorkspace: ${scanDir}\nMemory: ${pack}\nDeep LLM: ${useLlm ? "on" : "off"}`, "info");
+		ctx.ui.setStatus("memctx", `🧠 ${pack} · refreshing memory`);
+		setTimeout(() => void (async () => {
+			try {
+				const files = await enrichGeneratedPackWithLlm(scanDir, pack, packPath, ctx, useLlm);
+				if (qmdAvailable && collection) qmdEmbed(collection, packPath).catch(() => {});
+				ctx.ui.notify(`memctx: Workspace memory refresh complete in ${Date.now() - started}ms\nupdated files: ${files.length}${files.length ? `\n${files.map((f) => `- ${path.relative(packPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}` : ""}`, "info");
+			} catch (err) {
+				ctx.ui.notify(`memctx: Workspace memory refresh failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`, "error");
+			} finally {
+				packEnrichRunning = false;
+				ctx.ui.setStatus("memctx", buildStatusText());
 			}
-			ctx.ui.notify([
-				`memctx profile: ${currentProfile}`,
-				`strict: ${strictMode ? "on" : "off"}`,
-				`retrieval: ${retrievalPolicy} (${retrievalLatencyBudgetMs}ms)`,
-				`autosave: ${autosaveMode}`,
-				`llm: ${llmMode}`,
-				`auto-switch: ${autoSwitchMode}`,
-				`gateway judge: ${gatewayJudgeMode}`,
-				`auto-bootstrap: ${autoBootstrapMode}`,
-			].join("\n"), "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
-		},
-	});
+		})(), 0);
+	}
 
-	// --- /memctx-config command: inspect/reset persistent config ---
-	pi.registerCommand("memctx-config", {
-		description: "Show or reset persistent memctx config. Usage: /memctx-config [status|reset]",
-		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			if (target === "reset") {
-				const config = profileDefaults("gateway");
-				applyMemctxConfig(config);
-				writeMemctxConfig(config);
-				ctx.ui.notify("memctx: Config reset to profile:gateway.", "info");
+	async function initializeWorkspaceMemory(args: string, ctx: ExtensionCommandContext): Promise<void> {
+		let packsDir = _packsDir || resolvePacksDir(ctx.cwd) || DEFAULT_GLOBAL_PACKS_DIR;
+		fs.mkdirSync(packsDir, { recursive: true });
+
+		const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
+		const noDeep = rawParts.includes("--no-deep");
+		const parts = rawParts.filter((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep");
+		let scanDir = parts[0] || ctx.cwd;
+		let slug = parts[1] || "";
+		if (!path.isAbsolute(scanDir)) scanDir = path.resolve(ctx.cwd, scanDir);
+		if (!fs.existsSync(scanDir)) {
+			ctx.ui.notify(`memctx: Workspace path not found: ${scanDir}`, "error");
+			return;
+		}
+		if (!slug) slug = path.basename(scanDir).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "workspace";
+
+		const targetPackPath = path.join(packsDir, slug);
+		if (fs.existsSync(targetPackPath)) {
+			const overwrite = await ctx.ui.confirm("Workspace memory exists", `Memory "${slug}" already exists. Refresh/rebuild it from ${scanDir}?`);
+			if (!overwrite) {
+				_packsDir = packsDir;
+				vaultRoot = path.dirname(packsDir);
+				activePack = slug;
+				activePackPath = targetPackPath;
+				qmdCollection = `memctx-${slug}`;
+				rememberWorkspaceMemory(packsDir, scanDir, slug);
+				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
+				ctx.ui.notify(`memctx: Linked workspace to existing memory "${slug}".`, "info");
 				ctx.ui.setStatus("memctx", buildStatusText());
 				return;
 			}
-			if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-config [status|reset]", "error");
-				return;
-			}
-			ctx.ui.notify(`memctx config: ${memctxConfigPath()}\n${JSON.stringify(currentMemctxConfig(), null, 2)}`, "info");
+			fs.rmSync(targetPackPath, { recursive: true });
+		}
+
+		ctx.ui.notify(`memctx: Initializing workspace memory for ${scanDir}...`, "info");
+		const { packPath, filesCreated } = generatePackFromDirectory(scanDir, slug, packsDir);
+		_packsDir = packsDir;
+		vaultRoot = path.dirname(packsDir);
+		activePack = slug;
+		activePackPath = packPath;
+		qmdCollection = `memctx-${slug}`;
+		lastPackSwitch = { from: "", to: slug, reason: "initialized workspace memory", confidence: "high", timestamp: nowTimestamp() };
+		rememberWorkspaceMemory(packsDir, scanDir, slug);
+
+		ctx.ui.notify(`memctx: Workspace memory "${slug}" initialized.\nWorkspace: ${scanDir}\nFiles created: ${filesCreated.length}\nLearning: ${autosaveMode}\nSearch: ${qmdAvailable ? "qmd" : "grep fallback"}`, "info");
+		ctx.ui.setStatus("memctx", buildStatusText());
+		await refreshWorkspaceMemory(scanDir, ctx, noDeep);
+	}
+
+	pi.registerCommand("memctx", {
+		description: "Show pi-memctx help and workspace memory status. Usage: /memctx",
+		handler: async (_args, ctx) => {
+			ctx.ui.notify([
+				"pi-memctx — local Markdown memory for Pi",
+				"",
+				...workspaceStatusLines(ctx, false),
+				"",
+				"Daily commands:",
+				"  /memctx-init      Create/update memory for this workspace",
+				"  /memctx-status    Show workspace memory status",
+				"  /memctx-refresh   Refresh workspace memory",
+				"  /memctx-doctor    Diagnose setup",
+				"",
+				"Tip: normally you just ask Pi questions. Memory works automatically.",
+			].join("\n"), "info");
 		},
 	});
 
-	// --- /memctx-strict command: toggle strict memory gate ---
-	pi.registerCommand("memctx-strict", {
-		description: "Toggle strict memory retrieval guidance. Usage: /memctx-strict [on|off|status]",
+	pi.registerCommand("memctx-status", {
+		description: "Show workspace memory status. Usage: /memctx-status [--advanced]",
 		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			let changed = false;
-			if (["on", "true", "1", "yes"].includes(target)) {
-				strictMode = true;
-				changed = true;
-			} else if (["off", "false", "0", "no"].includes(target)) {
-				strictMode = false;
-				changed = true;
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-strict [on|off|status]", "error");
-				return;
-			}
-			if (changed) markCustomAndPersist();
-			ctx.ui.notify(`memctx: Strict mode ${strictMode ? "on" : "off"}.`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
+			const advanced = /--advanced|advanced/i.test(args ?? "");
+			ctx.ui.notify(workspaceStatusLines(ctx, advanced).join("\n"), "info");
 		},
 	});
 
-	// --- /memctx-auto-switch command: toggle cwd/prompt pack switching ---
-	pi.registerCommand("memctx-auto-switch", {
-		description: "Configure automatic pack switching. Usage: /memctx-auto-switch [off|cwd|prompt|all|status]",
+	pi.registerCommand("memctx-init", {
+		description: "Create or update memory for the current workspace. Usage: /memctx-init [path] [name] [--no-deep]",
+		handler: initializeWorkspaceMemory,
+	});
+
+	pi.registerCommand("memctx-refresh", {
+		description: "Refresh memory for the current workspace. Usage: /memctx-refresh [path] [--no-deep]",
 		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			let changed = false;
-			if (["off", "cwd", "prompt", "all"].includes(target)) {
-				autoSwitchMode = target as AutoSwitchMode;
-				changed = true;
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-auto-switch [off|cwd|prompt|all|status]", "error");
-				return;
-			}
-			if (changed) markCustomAndPersist();
-			ctx.ui.notify(`memctx: Auto-switch ${autoSwitchMode}.`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
+			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
+			const noDeep = rawParts.includes("--no-deep");
+			const scanArg = rawParts.find((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep");
+			let scanDir = scanArg || ctx.cwd;
+			if (!path.isAbsolute(scanDir)) scanDir = path.resolve(ctx.cwd, scanDir);
+			await refreshWorkspaceMemory(scanDir, ctx, noDeep);
 		},
 	});
 
-	// --- /memctx-llm command: configure LLM assistance ---
-	pi.registerCommand("memctx-llm", {
-		description: "Configure LLM assistance. Usage: /memctx-llm [off|assist|first|status]",
-		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			let changed = false;
-			if (["off", "assist", "first"].includes(target)) {
-				llmMode = target as LlmMode;
-				llmStats.mode = llmMode;
-				changed = true;
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-llm [off|assist|first|status]", "error");
-				return;
-			}
-			if (changed) markCustomAndPersist();
-			ctx.ui.notify(`memctx: LLM mode ${llmMode}. Calls this session: ${llmStats.callsThisSession}. Last: ${llmStats.lastUseCase ?? "none"}.`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
-		},
-	});
-
-	// --- /memctx-retrieval command: configure automatic retrieval depth ---
-	pi.registerCommand("memctx-retrieval", {
-		description: "Configure automatic memory retrieval. Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]",
-		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			let changed = false;
-			if (["auto", "fast", "balanced", "deep", "strict"].includes(target)) {
-				retrievalPolicy = target as RetrievalPolicy;
-				changed = true;
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-retrieval [auto|fast|balanced|deep|strict|status]", "error");
-				return;
-			}
-			if (changed) markCustomAndPersist();
-			ctx.ui.notify(`memctx: Retrieval policy ${retrievalPolicy}.`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
-		},
-	});
-
-	// --- /memctx-autosave command: configure memory capture behavior ---
-	pi.registerCommand("memctx-autosave", {
-		description: "Configure memory save suggestions. Usage: /memctx-autosave [off|suggest|confirm|auto|status]",
-		handler: async (args, ctx) => {
-			const target = (args ?? "status").trim().toLowerCase();
-			let changed = false;
-			if (["off", "suggest", "confirm", "auto"].includes(target)) {
-				autosaveMode = target as AutosaveMode;
-				changed = true;
-			} else if (target && target !== "status") {
-				ctx.ui.notify("memctx: Usage: /memctx-autosave [off|suggest|confirm|auto|status]", "error");
-				return;
-			}
-			if (changed) markCustomAndPersist();
-			ctx.ui.notify(`memctx: Autosave ${autosaveMode}. Save queue: ${readSaveQueue().length} pending.`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
-		},
-	});
-
-	// --- /memctx-save-queue command: review pending memory candidates ---
-	pi.registerCommand("memctx-save-queue", {
-		description: "Review memory save candidates. Usage: /memctx-save-queue [list|approve <id>|reject <id>|clear]",
-		handler: async (args, ctx) => {
-			const [action = "list", id = ""] = (args ?? "").trim().split(/\s+/).filter(Boolean);
-			let queue = readSaveQueue();
-			if (action === "clear") {
-				writeSaveQueue([]);
-				ctx.ui.notify("memctx: Save queue cleared.", "info");
-				return;
-			}
-			if (action === "reject") {
-				queue = queue.filter((item) => item.id !== id);
-				writeSaveQueue(queue);
-				ctx.ui.notify(`memctx: Rejected candidate ${id || "<none>"}.`, "info");
-				return;
-			}
-			if (action === "approve") {
-				const candidate = queue.find((item) => item.id === id);
-				if (!candidate) {
-					ctx.ui.notify(`memctx: Candidate not found: ${id}`, "error");
-					return;
-				}
-				try {
-					const saved = saveMemoryCandidate(candidate);
-					writeSaveQueue(queue.filter((item) => item.id !== id));
-					if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-					ctx.ui.notify(`memctx: Saved candidate to ${saved.rel}`, "info");
-				} catch (err) {
-					ctx.ui.notify(`memctx: Could not save candidate: ${err instanceof Error ? err.message : String(err)}`, "error");
-				}
-				return;
-			}
-			if (queue.length === 0) {
-				ctx.ui.notify("memctx: Save queue is empty.", "info");
-				return;
-			}
-			ctx.ui.notify(queue.map((item) => `${item.id}: ${item.type} · ${item.title} · ${Math.round(item.confidence * 100)}%`).join("\n"), "info");
-		},
-	});
-
-	// --- /memctx-doctor command: diagnose runtime and pack health ---
+	// --- /memctx-doctor command: diagnose runtime and memory health ---
 	pi.registerCommand("memctx-doctor", {
-		description: "Diagnose active memory pack health and runtime configuration. Usage: /memctx-doctor",
+		description: "Diagnose workspace memory health and runtime configuration. Usage: /memctx-doctor",
 		handler: async (_args, ctx) => {
 			const files = activePackPath ? scanPackFiles(activePackPath) : [];
 			const placeholders = files.filter((file) => readFileSafe(file)?.includes("<Add wikilink>")).length;
@@ -4276,16 +4250,18 @@ export default function (pi: ExtensionAPI) {
 				if (seen.has(slug)) duplicateSlugs.add(slug);
 				seen.add(slug);
 			}
+			const packsDir = _packsDir || (vaultRoot ? path.join(vaultRoot, "packs") : "");
 			const lines = [
-				`Pack: ${activePack || "<none>"}`,
+				"🧠 pi-memctx doctor",
+				`Memory: ${activePack || "<none>"}`,
+				`Workspace: ${ctx.cwd}`,
 				`Path: ${activePackPath || "<none>"}`,
 				`Files: ${files.length} markdown`,
 				`qmd: ${qmdStatus.available ? "available" : "unavailable"} (${qmdStatus.source})`,
 				`qmd collection: ${qmdCollection || "<none>"}`,
-				`Retrieval: ${retrievalPolicy}`,
-				`Autosave: ${autosaveMode}`,
-				`LLM: ${llmMode}`,
-				`Strict: ${strictMode ? "on" : "off"}`,
+				`Learning: ${autosaveMode}`,
+				`Search/retrieval: ${retrievalPolicy}`,
+				`Workspace map: ${packsDir ? workspaceMapPathForPacksDir(packsDir) : "<none>"}`,
 				`Save queue: ${readSaveQueue().length} pending`,
 				`Template placeholders: ${placeholders}`,
 				`Possible duplicate slugs: ${duplicateSlugs.size}`,
@@ -4293,229 +4269,6 @@ export default function (pi: ExtensionAPI) {
 			];
 			ctx.ui.notify(lines.join("\n"), possibleSecrets ? "warning" : "info");
 		},
-	});
-
-	// --- /memctx-pack-enrich command: enrich existing pack with LLM/qmd notes ---
-	pi.registerCommand("memctx-pack-enrich", {
-		description: "Deep-enrich the active pack in the background. Usage: /memctx-pack-enrich [source-dir] [--no-deep]",
-		handler: async (args, ctx) => {
-			if (!activePackPath || !activePack) {
-				ctx.ui.notify("memctx: No active pack to enrich.", "error");
-				return;
-			}
-			if (packEnrichRunning) {
-				ctx.ui.notify("memctx enrich: already running in the background. Wait for completion before starting another enrich.", "warning");
-				return;
-			}
-			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
-			const noDeep = rawParts.includes("--no-deep");
-			let scanDir = rawParts.filter((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep")[0] ?? "";
-			if (!scanDir) {
-				const resource = readFileSafe(path.join(activePackPath, "00-system", "pi-agent", "resource-map.md")) ?? "";
-				scanDir = resource.match(/## Source directory\s*\n\s*`([^`]+)`/m)?.[1] ?? "";
-			}
-			if (!scanDir || !fs.existsSync(scanDir)) {
-				ctx.ui.notify("memctx: Source directory not found. Usage: /memctx-pack-enrich [source-dir] [--no-deep]", "error");
-				return;
-			}
-			const pack = activePack;
-			const packPath = activePackPath;
-			const collection = qmdCollection;
-			const started = Date.now();
-			const useLlm = !noDeep && !!ctx.model;
-			packEnrichRunning = true;
-			ctx.ui.notify(`memctx enrich: started in background for pack ${pack}\nsource: ${scanDir}\ndeep LLM: ${useLlm ? "on" : "off"}\nqmd indexing: ${qmdAvailable ? "background" : "unavailable"}`, "info");
-			ctx.ui.setStatus("memctx", `📦 ${pack} · enriching in background`);
-			setTimeout(() => void (async () => {
-				try {
-					const files = await enrichGeneratedPackWithLlm(scanDir, pack, packPath, ctx, useLlm);
-					if (qmdAvailable && collection) qmdEmbed(collection, packPath).catch(() => {});
-					ctx.ui.notify(`memctx enrich: complete in ${Date.now() - started}ms\nupdated files: ${files.length}\n${files.map((f) => `- ${path.relative(packPath, f)}`).slice(0, 12).join("\n")}${files.length > 12 ? "\n- ..." : ""}`, "info");
-				} catch (err) {
-					ctx.ui.notify(`memctx enrich: failed after ${Date.now() - started}ms: ${err instanceof Error ? err.message : String(err)}`, "error");
-				} finally {
-					packEnrichRunning = false;
-					ctx.ui.setStatus("memctx", buildStatusText());
-				}
-			})(), 0);
-		},
-	});
-
-	// --- /memctx-pack command: list and switch packs ---
-	const packCommand = {
-		description: "List or switch memory packs. Usage: /memctx-pack [name]",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			const packsDir = _packsDir || resolvePacksDir(ctx.cwd);
-			if (!packsDir) {
-				ctx.ui.notify("memctx: No packs found. Use /memctx-pack-generate to create one.", "error");
-				return;
-			}
-
-			const packs = listPacks(packsDir);
-
-			if (packs.length === 0) {
-				ctx.ui.notify("memctx: No packs found.", "info");
-				return;
-			}
-
-			const target = args?.trim();
-
-			if (!target) {
-				// No argument: show picker
-				const options = packs.map((p) =>
-					p === activePack ? `📦 ${p} (active)` : p,
-				);
-
-				const selected = await ctx.ui.select("Select memory pack", options);
-				if (!selected) return;
-
-				// Strip the prefix if it was the active one
-				const packName = selected.replace(/^📦 /, "").replace(/ \(active\)$/, "");
-
-				if (packName === activePack) {
-					ctx.ui.notify(`memctx: Already using pack "${activePack}".`, "info");
-					return;
-				}
-
-				const from = activePack;
-				activePack = packName;
-				activePackPath = path.join(packsDir, packName);
-				qmdCollection = `memctx-${packName}`;
-				lastPackSwitch = { from, to: packName, reason: "manual /memctx-pack selection", confidence: "high", timestamp: nowTimestamp() };
-
-				if (qmdAvailable) {
-					qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-				}
-
-				ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
-				ctx.ui.setStatus("memctx", buildStatusText());
-				return;
-			}
-
-			// Argument provided: switch directly
-			if (!packs.includes(target)) {
-				ctx.ui.notify(`memctx: Pack "${target}" not found. Available: ${packs.join(", ")}`, "error");
-				return;
-			}
-
-			if (target === activePack) {
-				ctx.ui.notify(`memctx: Already using pack "${activePack}".`, "info");
-				return;
-			}
-
-			const from = activePack;
-			activePack = target;
-			activePackPath = path.join(packsDir, target);
-			qmdCollection = `memctx-${target}`;
-			lastPackSwitch = { from, to: target, reason: "manual /memctx-pack argument", confidence: "high", timestamp: nowTimestamp() };
-
-			if (qmdAvailable) {
-				qmdEmbed(qmdCollection, activePackPath).catch(() => {});
-			}
-
-			ctx.ui.notify(`memctx: Switched to pack "${activePack}".`, "info");
-			ctx.ui.setStatus("memctx", buildStatusText());
-		},
-	};
-	pi.registerCommand("memctx-pack", packCommand);
-	pi.registerCommand("pack", {
-		...packCommand,
-		description: "Deprecated alias for /memctx-pack.",
-	});
-
-	// --- /memctx-pack-generate command: generate a pack from a directory ---
-	const packGenerateCommand = {
-		description: "Generate a memory pack from a directory of repos. Usage: /memctx-pack-generate [path] [slug] [--no-deep]",
-		handler: async (args: string, ctx: ExtensionCommandContext) => {
-			// Resolve packs directory — create default if none exists
-			let packsDir = _packsDir;
-			if (!packsDir) {
-				// Try to find existing packs dir
-				const resolvedPacksDir = resolvePacksDir(ctx.cwd);
-				if (resolvedPacksDir) packsDir = resolvedPacksDir;
-			}
-			if (!packsDir) {
-				// Create default global packs directory
-				packsDir = DEFAULT_GLOBAL_PACKS_DIR;
-				fs.mkdirSync(packsDir, { recursive: true });
-			}
-
-			const rawParts = (args ?? "").trim().split(/\s+/).filter(Boolean);
-			const noDeep = rawParts.includes("--no-deep");
-			const parts = rawParts.filter((part) => part !== "--deep" && part !== "deep" && part !== "--no-deep");
-			let scanDir = parts[0] || ctx.cwd;
-			let slug = parts[1] || "";
-
-			// Resolve relative paths
-			if (!path.isAbsolute(scanDir)) {
-				scanDir = path.resolve(ctx.cwd, scanDir);
-			}
-
-			if (!fs.existsSync(scanDir)) {
-				ctx.ui.notify(`memctx: Directory not found: ${scanDir}`, "error");
-				return;
-			}
-
-			// Derive slug from directory name if not provided
-			if (!slug) {
-				slug = path.basename(scanDir).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-			}
-
-			const targetPackPath = path.join(packsDir, slug);
-			if (fs.existsSync(targetPackPath)) {
-				const overwrite = await ctx.ui.confirm(
-					"Pack exists",
-					`Pack "${slug}" already exists at ${targetPackPath}. Overwrite?`,
-				);
-				if (!overwrite) return;
-				fs.rmSync(targetPackPath, { recursive: true });
-			}
-
-			ctx.ui.notify(`memctx: Scanning ${scanDir}...`, "info");
-
-			const { packPath, filesCreated } = generatePackFromDirectory(scanDir, slug, packsDir);
-
-			// Auto-switch to the new pack immediately after deterministic generation.
-			_packsDir = packsDir;
-			vaultRoot = path.dirname(packsDir);
-			activePack = slug;
-			activePackPath = packPath;
-			qmdCollection = `memctx-${slug}`;
-			lastPackSwitch = { from: "", to: slug, reason: "generated new pack", confidence: "high", timestamp: nowTimestamp() };
-
-			const useLlm = !noDeep && !!ctx.model;
-			ctx.ui.notify(
-				`memctx: Pack "${slug}" generated with ${filesCreated.length} files from ${scanDir}${useLlm ? "\nmemctx: Deep enrichment started in background." : "\nmemctx: Deep enrichment skipped (no selected model or --no-deep)."}`,
-				"info",
-			);
-			ctx.ui.setStatus("memctx", buildStatusText());
-
-			if (packEnrichRunning) {
-				ctx.ui.notify("memctx: Another enrichment job is already running; generated pack will be indexed only.", "warning");
-				if (qmdAvailable) qmdEmbed(qmdCollection, packPath).catch(() => {});
-				return;
-			}
-
-			packEnrichRunning = true;
-			setTimeout(() => void (async () => {
-				const started = Date.now();
-				try {
-					const enriched = useLlm ? await enrichGeneratedPackWithLlm(scanDir, slug, packPath, ctx, true) : [];
-					if (qmdAvailable) qmdEmbed(qmdCollection, packPath).catch(() => {});
-					ctx.ui.notify(`memctx: Background ${useLlm ? "deep enrichment and " : ""}indexing complete for "${slug}" in ${Date.now() - started}ms${enriched.length ? `\nupdated files: ${enriched.length}` : ""}`, "info");
-				} catch (err) {
-					ctx.ui.notify(`memctx: Background enrichment failed for "${slug}": ${err instanceof Error ? err.message : String(err)}`, "error");
-				} finally {
-					packEnrichRunning = false;
-					ctx.ui.setStatus("memctx", buildStatusText());
-				}
-			})(), 0);
-		},
-	};
-	pi.registerCommand("memctx-pack-generate", packGenerateCommand);
-	pi.registerCommand("pack-generate", {
-		...packGenerateCommand,
-		description: "Deprecated alias for /memctx-pack-generate.",
 	});
 
 	// --- memctx_search tool ---
@@ -4584,7 +4337,7 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				const hint = crossResults.length > 0
-					? "\n\nTry switching pack: " + crossResults.map((p) => "/memctx-pack " + p).join(", ")
+					? "\n\nRelated memory may exist in: " + crossResults.join(", ")
 					: "";
 
 				return {
