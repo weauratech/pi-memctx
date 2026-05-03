@@ -18,7 +18,9 @@ before_agent_start
   -> keep auto retrieval latency-bounded
   -> search active workspace memory for prompt-relevant context
   -> build compact Memory Gateway Brief
-  -> append context and guidance to the system prompt
+  -> derive requested-item coverage for multi-part prompts
+  -> mark memory sufficient, partial, insufficient, or conflicting
+  -> append context, missing checklist items, and fallback guidance to the system prompt
 
 memctx_search
   -> qmd keyword/semantic/deep search when available
@@ -74,4 +76,5 @@ The internal storage model remains Markdown packs under a memory vault. Packs ar
 - Observable memory state: `/memctx-status` reports workspace memory readiness; `/memctx-status --advanced` shows internal pack/config/search details.
 - Rich persistence by default: when pi-memctx persists, notes should be reusable without the original conversation.
 - Source of truth wins: repository files and live system state override memory notes.
+- Quality guardrails: memory can skip redundant source inspection only when coverage is sufficient; partial memory should trigger focused memory search or source fallback for missing items.
 - Generated memory is conservative: deterministic generation avoids destructive commands and redacts sensitive-looking values.

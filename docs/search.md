@@ -6,7 +6,7 @@ pi-memctx retrieves relevant workspace memory automatically before each prompt. 
 Ask Pi normally.
 ```
 
-The Memory Gateway searches local Markdown notes, judges whether they are useful, injects compact context when appropriate, and lets Pi inspect the repository normally when memory is insufficient or stale.
+The Memory Gateway searches local Markdown notes, judges whether they are useful, injects compact context when appropriate, and lets Pi inspect the repository normally when memory is insufficient, partial, stale, or asks for current source-of-truth state.
 
 ## Search backend
 
@@ -46,6 +46,8 @@ Modes:
 - `deep` — hybrid/reranked qmd search when available
 
 When the Memory Gateway already injected sufficient memory, the agent is instructed not to call `memctx_search` again. That keeps answers fast and avoids duplicate retrieval.
+
+For multi-part prompts, the gateway now derives a compact checklist of requested items and shows coverage in the injected brief. If memory covers only part of the checklist, the brief is marked `partial` and instructs the agent to use focused `memctx_search` or source inspection only for the missing items. Prompts that ask for current status, logs, PRs, runs, or other source-of-truth state are also prevented from being treated as fully sufficient from memory alone.
 
 ## Tuning
 

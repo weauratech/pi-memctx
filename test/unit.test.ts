@@ -20,9 +20,11 @@ import {
 	_setVaultRoot,
 	buildNote,
 	buildPackContext,
+	buildPromptRequirements,
 	llmArchitectureNote,
 	buildSessionHandoff,
 	detectActivePack,
+	evaluateGatewayCoverage,
 	findVaultRoot,
 	generatePackFromDirectory,
 	grepSearchPack,
@@ -277,6 +279,32 @@ import registerExtension from "../index.js";
 // ==========================================================================
 // 1. Utility functions
 // ==========================================================================
+
+describe("Memory Gateway coverage guardrails", () => {
+	test("extracts multi-part deployment requirements from prompts", () => {
+		const labels = buildPromptRequirements("Explique deploy dos Lambdas incluindo repos, tags, GitHub Actions, S3, Terraform e aprovação.").map((item) => item.label);
+		expect(labels).toContain("repositories involved");
+		expect(labels).toContain("tags/versioning");
+		expect(labels).toContain("GitHub Actions/workflows");
+		expect(labels).toContain("S3/artifacts");
+		expect(labels).toContain("Terraform/foundation");
+		expect(labels).toContain("approval/manual gate");
+	});
+
+	test("marks missing critical checklist items when memory is partial", () => {
+		const requirements = buildPromptRequirements("Explique diagnóstico de root traces no Grafana/Tempo com Quarkus, OTel, Datadog e porta 9001.");
+		const coverage = evaluateGatewayCoverage(requirements, [{
+			id: "c1",
+			path: "70-runbooks/observability.md",
+			content: "Grafana Tempo root traces with Quarkus OTel configuration are documented here.",
+			source: "none",
+		}]);
+		expect(coverage.coveredItems).toContain("Grafana/Tempo symptom");
+		expect(coverage.coveredItems).toContain("Quarkus OTel configuration");
+		expect(coverage.criticalMissing).toContain("Datadog interaction");
+		expect(coverage.criticalMissing).toContain("management port/service");
+	});
+});
 
 describe("readFileSafe", () => {
 	beforeEach(setupTmpDir);

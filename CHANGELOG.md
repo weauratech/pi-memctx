@@ -7,6 +7,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.12.0] - 2026-05-03
+
+### Added
+
+- Add coverage-aware Memory Gateway guardrails that derive requested checklist items from multi-part prompts and surface covered/missing items in the injected brief.
+- Add progressive fallback guidance for partial memory: use memory first, then focused `memctx_search`, then source inspection only when needed.
+- Add prompt-aware retrieval boosting so runbooks, context notes, observations, and decisions that cover missing requested items are included before generic matches.
+
+### Changed
+
+- Downgrade false-positive `sufficient` decisions to `partial` or `insufficient` when memory misses critical requested items or the prompt asks for current source-of-truth state.
+- Keep fast responses for genuinely sufficient memory while adding quality guardrails for partial, stale, or incomplete memory.
+
+
 ## [0.11.1] - 2026-05-03
 
 ### Fixed

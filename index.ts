@@ -988,6 +988,27 @@ function gatewayPackCandidates(packPath: string, prompt: string, existing: Gatew
 	const { anchors, ranked } = rankCandidates(prompt, all);
 	const selected = selectCoverageCandidates(anchors, ranked, limit).map((item) => item.candidate);
 	const selectedPaths = new Set(selected.map((candidate) => candidate.path));
+	const requirements = buildPromptRequirements(prompt);
+	if (requirements.length > 0) {
+		const coverageBoosts = all
+			.filter((candidate) => !selectedPaths.has(candidate.path))
+			.map((candidate) => {
+				const covered = requirements.filter((requirement) => candidateMatchesRequirement(candidate, requirement));
+				const typeBoost = candidate.path.startsWith("70-runbooks/") ? 3
+					: candidate.path.startsWith("20-context/") ? 2
+						: candidate.path.startsWith("60-observations/") ? 1.5
+							: candidate.path.startsWith("50-decisions/") || candidate.path.startsWith("30-decisions/") ? 1.3
+								: 1;
+				return { candidate, score: covered.length * typeBoost, critical: covered.filter((item) => item.critical).length };
+			})
+			.filter((item) => item.score > 0)
+			.sort((a, b) => b.critical - a.critical || b.score - a.score || a.candidate.path.localeCompare(b.candidate.path));
+		for (const item of coverageBoosts) {
+			if (selected.length >= limit) break;
+			selected.push(item.candidate);
+			selectedPaths.add(item.candidate.path);
+		}
+	}
 	for (const candidate of all.filter((item) => item.path.startsWith("20-context/")).slice(0, 4)) {
 		if (selected.length >= limit) break;
 		if (!selectedPaths.has(candidate.path)) selected.push(candidate);
@@ -1019,6 +1040,124 @@ function isPrecisionRepoQuestion(prompt: string): boolean {
 	return subject && asksForTruth;
 }
 
+
+export type GatewayRequirement = {
+	label: string;
+	aliases: string[];
+	critical?: boolean;
+};
+
+export type GatewayCoverage = {
+	requestedItems: GatewayRequirement[];
+	coveredItems: string[];
+	missingItems: string[];
+	criticalMissing: string[];
+	coverageRatio: number;
+	relevantCandidateIds: string[];
+};
+
+function addGatewayRequirement(items: GatewayRequirement[], label: string, aliases: string[], critical = false) {
+	if (items.some((item) => item.label === label)) return;
+	items.push({ label, aliases: [label, ...aliases].map((alias) => normalizeSearchText(alias)).filter(Boolean), critical });
+}
+
+export function buildPromptRequirements(prompt: string): GatewayRequirement[] {
+	const text = normalizeSearchText(prompt);
+	const items: GatewayRequirement[] = [];
+	const asksStructure = /\b(estrutura|structure|arquitetura|architecture|como funciona|funciona|works|overview)\b/.test(text);
+	const asksDeploy = /\b(deploy|deployment|release|versionamento|versioning|pipeline|github actions|argocd|argo|helm|kustomize|terraform|s3|lambda|production|prod|staging|hml)\b/.test(text);
+	const asksOperations = /\b(cuidados|safety|safe|dangerous|perigos|operacionais|rollback|aprovacao|approval|manual)\b/.test(text);
+	const asksContinuation = /\b(retome|continue|continuar|resume|frontend-workflow|o que j[aá] estava|bloquead|proximos passos|next steps|p0|p1)\b/.test(text);
+	const asksObservability = /\b(root traces?|tempo|grafana|otel|opentelemetry|quarkus|datadog|loki|traceid|observability|observabilidade)\b/.test(text);
+
+	if (asksStructure) addGatewayRequirement(items, "structure/architecture", ["estrutura", "architecture", "directory", "folders"], true);
+	if (/\b(ambiente|ambientes|environment|environments|hml|staging|production|prod|pci|prd)\b/.test(text)) addGatewayRequirement(items, "environments", ["ambientes", "environment", "staging", "production", "prod", "prd", "pci"], true);
+	if (/\b(helm|values\.yaml|values)\b/.test(text)) addGatewayRequirement(items, "Helm/values", ["helm", "values.yaml", "values"], true);
+	if (/\b(kustomize|overlay|overlays)\b/.test(text)) addGatewayRequirement(items, "Kustomize/overlays", ["kustomize", "overlay", "overlays", "kustomization.yaml"], true);
+	if (/\b(github actions|workflow|workflows|pipeline|ci|ci\/cd)\b/.test(text)) addGatewayRequirement(items, "GitHub Actions/workflows", ["github actions", "workflow", "workflows", "pipeline", ".github/workflows"], true);
+	if (/\b(argocd|argo cd|argo)\b/.test(text)) addGatewayRequirement(items, "ArgoCD flow", ["argocd", "argo cd", "sync", "applicationset", "application"], true);
+	if (asksDeploy) addGatewayRequirement(items, "deploy/release flow", ["deploy", "deployment", "release", "promotion", "fluxo", "flow"], true);
+	if (/\b(repo|repos|repository|repositorios?|envolvidos)\b/.test(text)) addGatewayRequirement(items, "repositories involved", ["repo", "repository", "repositories", "repositórios", "foundation", "api"], true);
+	if (/\b(tag|tags|versionamento|versioning|semver)\b/.test(text)) addGatewayRequirement(items, "tags/versioning", ["tag", "tags", "versioning", "versionamento", "semver"], true);
+	if (/\b(s3|artifact|artifacts|artefato|artefatos|bucket)\b/.test(text)) addGatewayRequirement(items, "S3/artifacts", ["s3", "artifact", "artifacts", "bucket", "lambda-artifacts"], true);
+	if (/\b(terraform|tfvars|foundation|apply|plan)\b/.test(text)) addGatewayRequirement(items, "Terraform/foundation", ["terraform", "tfvars", "lambda-artifacts.auto.tfvars.json", "foundation", "plan", "apply"], true);
+	if (/\b(aprovacao|approval|manual|pr|pull request)\b/.test(text)) addGatewayRequirement(items, "approval/manual gate", ["approval", "manual", "pull request", "pr", "aprovação"], true);
+	if (/\b(trusted publishing|npm|oidc|provenance|npm_token|token)\b/.test(text)) {
+		addGatewayRequirement(items, "npm Trusted Publishing", ["trusted publishing", "npm", "publish", "publishing"], true);
+		addGatewayRequirement(items, "OIDC/provenance", ["oidc", "provenance", "id-token"], true);
+		addGatewayRequirement(items, "npm/GitHub configuration", ["npm", "github", "environment", "release.yml", "NPM_TOKEN"], true);
+	}
+	if (asksContinuation) {
+		addGatewayRequirement(items, "prior completed work", ["p0", "completed", "feito", "done", "implementado"], true);
+		addGatewayRequirement(items, "current blockers", ["blocked", "bloqueado", "billing", "spending", "ci", "deploy"], true);
+		addGatewayRequirement(items, "next P1 steps", ["p1", "next steps", "próximos passos", "ProductStep", "StartStep", "slice"], true);
+		addGatewayRequirement(items, "traceability", ["commit", "branch", "path", "file", "deploy", "production"], false);
+	}
+	if (asksObservability) {
+		addGatewayRequirement(items, "Grafana/Tempo symptom", ["grafana", "tempo", "root trace", "root traces", "root span"], true);
+		addGatewayRequirement(items, "Quarkus OTel configuration", ["quarkus", "otel", "opentelemetry", "build time", "build-time"], true);
+		addGatewayRequirement(items, "Datadog interaction", ["datadog", "dd_", "admission.datadoghq.com", "injection"], true);
+		addGatewayRequirement(items, "management port/service", ["management", "9001", "/q/metrics", "service"], true);
+		addGatewayRequirement(items, "Loki traceId derived field", ["loki", "traceid", "traceId", "derived field", "derived fields"], false);
+	}
+	if (asksOperations) addGatewayRequirement(items, "operational safety", ["safe", "dangerous", "manual", "approval", "rollback", "cuidados"], false);
+	return items.slice(0, 14);
+}
+
+function candidateMatchesRequirement(candidate: GatewayCandidate, requirement: GatewayRequirement): boolean {
+	const text = normalizeSearchText(`${candidate.path}\n${stripMarkdownMetadata(candidate.content)}`);
+	return requirement.aliases.some((alias) => alias.length >= 2 && text.includes(alias));
+}
+
+export function evaluateGatewayCoverage(requirements: GatewayRequirement[], candidates: GatewayCandidate[]): GatewayCoverage {
+	if (requirements.length === 0) return { requestedItems: [], coveredItems: [], missingItems: [], criticalMissing: [], coverageRatio: 1, relevantCandidateIds: [] };
+	const coveredItems: string[] = [];
+	const missingItems: string[] = [];
+	const criticalMissing: string[] = [];
+	const relevantCandidateIds = new Set<string>();
+	for (const requirement of requirements) {
+		const matches = candidates.filter((candidate) => candidateMatchesRequirement(candidate, requirement));
+		if (matches.length > 0) {
+			coveredItems.push(requirement.label);
+			for (const match of matches.slice(0, 3)) relevantCandidateIds.add(match.id);
+		} else {
+			missingItems.push(requirement.label);
+			if (requirement.critical) criticalMissing.push(requirement.label);
+		}
+	}
+	return { requestedItems: requirements, coveredItems, missingItems, criticalMissing, coverageRatio: coveredItems.length / Math.max(1, requirements.length), relevantCandidateIds: [...relevantCandidateIds] };
+}
+
+function sourceFreshnessRequired(prompt: string): string[] {
+	const text = normalizeSearchText(prompt);
+	const reasons: string[] = [];
+	if (/\b(confirme|confirm|verifique|verify|cheque|check|leia|read|summary|logs?|run|pipeline|ci|status atual|current status|latest|agora|now|erro|falhou|failed|rodando|running|pr #?\d+|pull request)\b/.test(text)) reasons.push("Prompt asks for current/source-of-truth state.");
+	if (/\b(retome|continue|continuar|resume)\b/.test(text) && /\b(bloquead|proximos passos|next steps|estado|status)\b/.test(text)) reasons.push("Continuation prompt asks for current state and next steps.");
+	return reasons;
+}
+
+function downgradeDecisionForCoverage<T extends GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }>(decision: T, coverage: GatewayCoverage, prompt: string): T {
+	if (coverage.requestedItems.length === 0) return decision;
+	const freshnessReasons = sourceFreshnessRequired(prompt);
+	let status = decision.status ?? "insufficient";
+	const missing = [...(decision.missing ?? [])];
+	if (coverage.missingItems.length > 0) missing.push(`Memory coverage missing: ${coverage.missingItems.join(", ")}.`);
+	for (const reason of freshnessReasons) missing.push(reason);
+	if (coverage.coverageRatio < 0.35) status = "insufficient";
+	else if (coverage.coverageRatio < 0.8 || coverage.criticalMissing.length > 0 || freshnessReasons.length > 0) {
+		if (status === "sufficient") status = "partial";
+	}
+	const confidence = status === "sufficient" ? decision.confidence : status === "partial" ? Math.min(decision.confidence ?? 0.7, 0.74) : Math.min(decision.confidence ?? 0.55, 0.58);
+	return {
+		...decision,
+		status,
+		confidence,
+		missing: [...new Set(missing)].slice(0, 10),
+		relevantCandidateIds: [...new Set([...(decision.relevantCandidateIds ?? []), ...coverage.relevantCandidateIds])],
+		reason: [decision.reason, coverage.requestedItems.length ? `coverage ${coverage.coveredItems.length}/${coverage.requestedItems.length}` : "", freshnessReasons.length ? "source freshness required" : ""].filter(Boolean).join("; "),
+	};
+}
+
 async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[], ctx: ExtensionContext): Promise<GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }> {
 	const fast = conservativeGatewayJudge(prompt, candidates);
 	const precisionRepoQuestion = isPrecisionRepoQuestion(prompt);
@@ -1027,6 +1166,8 @@ async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[]
 		path: candidate.path,
 		content: truncate(stripMarkdownMetadata(candidate.content), precisionRepoQuestion ? 1600 : 1000),
 	}));
+	const coverage = evaluateGatewayCoverage(buildPromptRequirements(prompt), candidates);
+	const finalize = <T extends GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }>(decision: T) => downgradeDecisionForCoverage(decision, coverage, prompt);
 	if (precisionRepoQuestion && ctx.model) {
 		const decision = await completeJsonWithModel<GatewayJudgeDecision>(ctx, "memory-gateway-precision", [
 			"You are a precision judge for a coding-agent memory gateway.",
@@ -1037,24 +1178,24 @@ async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[]
 			"Return JSON only: status one of sufficient|partial|insufficient|conflicting, confidence 0..1, relevantCandidateIds[], facts[], missing[], conflicts[], reason.",
 			"Do not answer the user.",
 		].join("\n"), { prompt: truncate(prompt, 900), candidates: llmCandidates() });
-		if (decision?.status) return { ...decision, backend: "main-llm" };
+		if (decision?.status) return finalize({ ...decision, backend: "main-llm" });
 	}
 	if (precisionRepoQuestion && fast.status === "sufficient") {
-		return {
+		return finalize({
 			...fast,
 			status: "partial",
 			confidence: Math.min(fast.confidence ?? 0.75, 0.74),
 			missing: [...(fast.missing ?? []), "Verify current source-of-truth files before giving precise repo/component details."],
 			reason: fast.reason ? `${fast.reason}; precise repo/component prompt requires source verification` : "Precise repo/component prompt requires source verification",
 			backend: "conservative",
-		};
+		});
 	}
-	if (gatewayJudgeMode === "off") return { ...fast, backend: "none" };
-	if (gatewayJudgeMode === "conservative") return { ...fast, backend: "conservative" };
+	if (gatewayJudgeMode === "off") return finalize({ ...fast, backend: "none" });
+	if (gatewayJudgeMode === "conservative") return finalize({ ...fast, backend: "conservative" });
 	if (gatewayJudgeMode === "auto") {
 		// Default gateway only fast-paths clear misses. Positive sufficiency still goes
 		// through the model judge to avoid terse or under-specified direct answers.
-		if (fast.status === "insufficient" && (fast.confidence ?? 0) >= 0.85) return { ...fast, backend: "fast-path" };
+		if (fast.status === "insufficient" && (fast.confidence ?? 0) >= 0.85) return finalize({ ...fast, backend: "fast-path" });
 	}
 	const shouldTryLlm = gatewayJudgeMode === "main-llm" || gatewayJudgeMode === "auto";
 	if (shouldTryLlm && ctx.model) {
@@ -1068,9 +1209,9 @@ async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[]
 			"Return JSON only: status one of sufficient|partial|insufficient|conflicting, confidence 0..1, relevantCandidateIds[], facts[], missing[], conflicts[], reason.",
 			"Facts must be concise, project-specific, and only from relevant candidates. Do not answer the user.",
 		].join("\n"), { prompt: truncate(prompt, 800), candidates: llmCandidates() });
-		if (decision?.status) return { ...decision, backend: "main-llm" };
+		if (decision?.status) return finalize({ ...decision, backend: "main-llm" });
 	}
-	return { ...fast, backend: "conservative" };
+	return finalize({ ...fast, backend: "conservative" });
 }
 
 function buildRequiredChecklist(facts: string[], prompt = ""): string[] {
@@ -1295,6 +1436,8 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 	const packCandidates = gatewayPackCandidates(packPath, prompt, retrievedCandidates, broadProject ? 7 : 8);
 	const candidates = (broadProject ? [...packCandidates, ...retrievedCandidates] : [...retrievedCandidates, ...packCandidates]).slice(0, broadProject ? 10 : 14);
 	const decision = await judgeGatewayMemory(prompt, candidates, ctx);
+	const requirements = buildPromptRequirements(prompt);
+	const coverage = evaluateGatewayCoverage(requirements, candidates);
 	const status = decision.status ?? "insufficient";
 	const confidence = typeof decision.confidence === "number" ? decision.confidence : 0;
 	const relevantIds = new Set(decision.relevantCandidateIds ?? []);
@@ -1313,7 +1456,7 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 	const instruction = status === "sufficient"
 		? "Answer from these facts now. Do not call memctx_search and do not inspect the repo: this brief is the memory search result. Checklist items are mandatory: mention them with exact names when relevant. Use other tools only if the user asks for current files/source lines or facts conflict."
 		: status === "partial"
-			? "Use as hint; inspect source files before final answer."
+			? "Use memory as a starting point. First call memctx_search with the missing checklist items if the answer depends on them; inspect source files only when memory remains incomplete or current state is requested."
 			: status === "conflicting"
 				? "Conflicting memory; inspect source-of-truth before answering."
 				: "No useful memory. Do not mention this; inspect repo/docs/workflows as normal.";
@@ -1326,7 +1469,8 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 	return truncate([
 		"## Memory Gateway Brief",
 		`Status: ${status}`,
-		status === "sufficient" ? "Tool policy: memory is sufficient; do not call memctx_search for this prompt." : "",
+		requirements.length ? `Coverage: ${coverage.coveredItems.length}/${requirements.length} requested item${requirements.length === 1 ? "" : "s"}` : "",
+		status === "sufficient" ? "Tool policy: memory is sufficient; do not call memctx_search for this prompt." : status === "partial" ? "Tool policy: memory is partial; use memctx_search/source fallback for missing items before final assertions." : "",
 		localSummary.length ? "\nLocal memory summary:" : "",
 		...localSummary.map((line) => `- ${line}`),
 		scaffold.length ? "\nAnswer scaffold:" : "",
@@ -1337,7 +1481,9 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 		...facts.slice(0, localSummary.length ? 4 : checklist.length ? 8 : 12).map((fact) => `- ${fact}`),
 		excerpts.length ? "\nExcerpts:" : "",
 		...excerpts,
-		decision.missing?.length ? "\nMissing:" : "",
+		coverage.missingItems.length ? "\nMissing checklist items:" : "",
+		...coverage.missingItems.slice(0, 6).map((item) => `- ${item}`),
+		decision.missing?.length ? "\nJudge missing/context:" : "",
 		...(decision.missing ?? []).slice(0, 3).map((item) => `- ${item}`),
 		decision.conflicts?.length ? "\nConflicts:" : "",
 		...(decision.conflicts ?? []).slice(0, 3).map((item) => `- ${item}`),
