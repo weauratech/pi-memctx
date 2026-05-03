@@ -12,7 +12,7 @@
   <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fweauratech%2Fpi-memctx&query=%24.stargazers_count&label=stars&color=yellow&style=flat&logo=github" alt="Stars"></a>
   <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
-  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.10.2-blue?style=flat" alt="Latest Release"></a>
+  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.11.0-blue?style=flat" alt="Latest Release"></a>
 </p>
 
 <p align="center">
@@ -21,7 +21,7 @@
   <a href="#automatic-learning">Learning</a> •
   <a href="#benchmark">Benchmark</a> •
   <a href="#how-it-works">How it works</a> •
-  <a href="#memory-packs">Packs</a> •
+  <a href="#workspace-memory">Workspace memory</a> •
   <a href="#commands">Commands</a> •
   <a href="#development">Development</a>
 </p>
@@ -72,10 +72,10 @@ pi -e pi-memctx
 Inside Pi:
 
 ```txt
-/memctx-pack-generate
+/memctx-init
 ```
 
-`pi-memctx` scans the workspace and creates a structured Markdown memory pack with context, decisions, runbooks, and indexes.
+`pi-memctx` scans the workspace and creates local Markdown workspace memory with context, decisions, runbooks, and indexes. Internally this is stored as a pack, but most users do not need to manage packs directly.
 
 ### 4. Ask normally
 
@@ -206,18 +206,11 @@ The gateway does **not** replace the main LLM. It does the boring part first: fi
 |---|---|---|
 | `gateway` | Fast daily use | Conservative local judge, compact context, qmd/grep retrieval, zero redundant memory searches when memory is sufficient. |
 
-Inspect or re-apply the profile inside Pi:
+The profile is applied by default. Use `/memctx-status --advanced` if you need to inspect the active runtime settings. Old profile names such as `gateway-lite`, `gateway-full`, `qmd-economy`, `low`, `balanced`, `auto`, and `full` are compatibility-mapped to `gateway` in configuration files.
 
-```txt
-/memctx-profile status
-/memctx-profile gateway
-```
+## Workspace memory
 
-Old profile names such as `gateway-lite`, `gateway-full`, `qmd-economy`, `low`, `balanced`, `auto`, and `full` are compatibility-mapped to `gateway`.
-
-## Memory packs
-
-A pack is a directory of Markdown files with frontmatter. You can edit it with any editor, commit it, review it, or open it in Obsidian.
+Each workspace gets local Markdown memory. Internally, workspace memory is stored as a pack directory with frontmatter. You can edit it with any editor, commit it, review it, or open it in Obsidian.
 
 ```txt
 packs/my-project/
@@ -264,26 +257,13 @@ Most users only need the daily commands:
 
 | Command | Purpose |
 |---|---|
-| `/memctx-pack-generate` | Create a memory pack from the current workspace. If a model is selected, deep LLM enrichment starts in the background by default; use `--no-deep` to skip it. |
-| `/memctx-pack` | Select or show the active pack. |
-| `/memctx-profile gateway` | Re-apply the recommended profile. |
-| `/memctx-doctor` | Diagnose qmd, packs, and configuration. |
+| `/memctx` | Show compact help and current memory status. |
+| `/memctx-init` | Create/update memory for this workspace. If a model is selected, deep LLM enrichment starts in the background by default; use `--no-deep` to skip it. |
+| `/memctx-status` | Show workspace memory status; add `--advanced` for internal paths/config. |
+| `/memctx-refresh` | Refresh workspace memory inventory/enrichment in the background. |
+| `/memctx-doctor` | Diagnose qmd, workspace memory, and configuration. |
 
-<details>
-<summary>Advanced commands</summary>
-
-| Command | Purpose |
-|---|---|
-| `/memctx-pack-status` | Show active pack and retrieval status. |
-| `/memctx-config` | Show current config. |
-| `/memctx-retrieval` | Configure retrieval policy. |
-| `/memctx-autosave` | Configure automatic learning behavior. The default gateway profile uses conservative `auto`. |
-| `/memctx-save-queue` | Review queued lower-confidence memory candidates. |
-| `/memctx-pack-enrich` | Enrich a pack with deterministic repository inventory and optional LLM synthesis. Runs in the background. |
-
-Deprecated aliases such as `/pack` and `/pack-generate` are still registered for compatibility.
-
-</details>
+Older pack/config commands were removed from the public command surface to keep the extension simple. Advanced behavior is still configurable through environment variables and the local config file.
 
 ## Tools
 
@@ -329,7 +309,7 @@ Secret-looking content is blocked.
 `pi-memctx` keeps a small status overlay in Pi:
 
 ```txt
-🧠 my-pack · memory ready · 3 memory hits · search:qmd · profile:gateway · learn auto
+🧠 my-pack · memory ready · 3 memory hits · qmd · learn auto
 ```
 
 This tells you which pack is active, whether memory was useful, which search backend is being used, and whether automatic learning is enabled.
@@ -397,7 +377,7 @@ Memory is Markdown on disk. You can inspect every byte.
 
 ## Configuration
 
-Most users should start with the defaults. Advanced users can configure behavior with environment variables or `/memctx-profile`.
+Most users should start with the defaults. Advanced users can configure behavior with environment variables or the local config file at `~/.config/pi-memctx/config.json`.
 
 Common environment variables:
 

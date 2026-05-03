@@ -1,44 +1,58 @@
-# Search
+# Search and retrieval
 
-`memctx_search` searches the active memory pack. Automatic context injection also performs prompt-specific retrieval before each agent turn using the configured retrieval policy.
-
-## Tool modes
-
-- `keyword`: fast default mode.
-- `semantic`: meaning-based search when qmd is installed.
-- `deep`: hybrid/reranked search when qmd is installed.
-
-## Automatic retrieval policies
+pi-memctx retrieves relevant workspace memory automatically before each prompt. The main user workflow is simply:
 
 ```txt
-/memctx-retrieval auto|fast|balanced|deep|strict|status
+Ask Pi normally.
 ```
 
-- `auto`: default; starts with fast keyword retrieval and only attempts bounded expansion when needed.
-- `fast`: one keyword query.
-- `balanced`: keyword plus LLM-expanded queries when available.
-- `deep`: multi-query retrieval with deeper qmd mode.
-- `strict`: always attempts expanded retrieval and reports attempted queries/cross-pack hints.
+The Memory Gateway searches local Markdown notes, judges whether they are useful, injects compact context when appropriate, and lets Pi inspect the repository normally when memory is insufficient or stale.
 
-`auto` uses `MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS` with a default of `1000`, so strict mode no longer turns `auto` into full strict retrieval. Use `/memctx-retrieval strict` when depth matters more than latency.
+## Search backend
 
-qmd is resolved from `QMD_PATH`/`MEMCTX_QMD_BIN`, already-installed local/vendor binaries, or `PATH`. Without qmd, pi-memctx falls back to local grep-style Markdown search. qmd is no longer installed automatically with pi-memctx so `pi install npm:pi-memctx` stays small and warning-free.
+pi-memctx uses qmd when available and falls back to grep when qmd is missing.
 
-## Examples
-
-```txt
-memctx_search(query="deploy rollback", mode="keyword", limit=5)
-memctx_search(query="why did we choose postgres", mode="semantic", limit=5)
-memctx_search(query="incident runbook for queue lag", mode="deep", limit=3)
-```
-
-## qmd
-
-pi-memctx attempts to use qmd automatically:
+Resolution order:
 
 1. `QMD_PATH` or `MEMCTX_QMD_BIN`
-2. local `node_modules/.bin/qmd` or `vendor/qmd/<platform>-<arch>/qmd`
+2. local/vendor binary paths
 3. `qmd` on `PATH`
 4. grep fallback
 
-Use `/memctx-pack-status`, `/memctx-doctor`, or `npx pi-memctx doctor` to see which path is active. `/pack-status` remains available as a deprecated compatibility alias.
+Check setup with:
+
+```txt
+/memctx-doctor
+```
+
+or:
+
+```bash
+npx pi-memctx doctor
+```
+
+## Explicit search
+
+The `memctx_search` tool is available to the agent. You can ask for it explicitly:
+
+```txt
+Use memctx_search to find the deploy runbook.
+```
+
+Modes:
+
+- `keyword` — fast lexical search
+- `semantic` — meaning-based qmd search when available
+- `deep` — hybrid/reranked qmd search when available
+
+When the Memory Gateway already injected sufficient memory, the agent is instructed not to call `memctx_search` again. That keeps answers fast and avoids duplicate retrieval.
+
+## Tuning
+
+Most users should keep the default `gateway` profile. Advanced users can tune retrieval with environment variables or `~/.config/pi-memctx/config.json`:
+
+```bash
+MEMCTX_RETRIEVAL=auto|fast|balanced|deep|strict
+MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS=1000
+MEMCTX_GATEWAY_JUDGE=off|conservative|auto|main-llm
+```

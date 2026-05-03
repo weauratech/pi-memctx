@@ -1,8 +1,14 @@
 # Getting Started
 
-pi-memctx is a Pi extension that loads local Markdown memory packs, injects relevant context before the agent acts, and exposes tools for search and safe persistence.
+pi-memctx is a Pi extension that gives each workspace local Markdown memory. It injects relevant context before the agent acts and can learn durable discoveries after turns.
 
 ## Install
+
+```bash
+pi install npm:pi-memctx
+```
+
+Or install from GitHub:
 
 ```bash
 pi install git:github.com/weauratech/pi-memctx
@@ -10,25 +16,46 @@ pi install git:github.com/weauratech/pi-memctx
 
 Restart Pi or run `/reload` if your Pi session supports it.
 
-## Pack locations
+## Initialize workspace memory
 
-pi-memctx looks for packs in this order:
+Start Pi from your project/workspace:
+
+```bash
+cd /path/to/workspace
+pi -e pi-memctx
+```
+
+Inside Pi:
+
+```txt
+/memctx-init
+```
+
+`/memctx-init` creates or updates local Markdown memory for the current workspace, writes a workspace-to-memory mapping, and starts background enrichment when a model is selected. Internally the memory is stored as a Markdown pack, but most users do not need to switch or manage packs manually.
+
+## Daily commands
+
+```txt
+/memctx          # compact help and current status
+/memctx-init     # create/update memory for this workspace
+/memctx-status   # show workspace memory status
+/memctx-refresh  # refresh inventory/enrichment in the background
+/memctx-doctor   # diagnose setup issues
+```
+
+Add `--advanced` to `/memctx-status` when you need internal paths/config details.
+
+## Where memory lives
+
+pi-memctx stores workspace memory under a local memory vault. It resolves packs in this order:
 
 1. `MEMCTX_PACKS_PATH`
 2. `<cwd>/.pi/memory-vault/packs/`
 3. `~/.pi/agent/memory-vault/packs/`
 
-## Create a pack
+Workspace path mappings are stored in the vault under `00-system/workspace-map.json`, so subdirectories can resolve the same workspace memory automatically.
 
-Use `/memctx-pack-generate` inside a Pi session:
-
-```txt
-/memctx-pack-generate /path/to/repos my-project
-```
-
-The generator performs deterministic local discovery of repositories, read-first docs, package scripts, GitHub Actions, Git remotes, Go/Node manifests, safe development commands, and selected infrastructure hints. When `MEMCTX_LLM_MODE` is enabled and a model is selected, it also performs LLM-assisted deep enrichment from selected redacted source snippets. See [Pack generation](pack-generate.md).
-
-Or create folders manually:
+Example internal structure:
 
 ```txt
 packs/my-project/
@@ -43,33 +70,35 @@ packs/my-project/
 
 See `examples/basic-pack/` for a minimal public-safe pack.
 
-## Use a pack
+## Use memory naturally
+
+Ask normal questions:
 
 ```txt
-/memctx-pack
-/memctx-pack my-project
-/memctx-pack-status
+How do I deploy this service to production?
 ```
 
-Deprecated aliases remain available for compatibility: `/pack`, `/pack-status`, and `/pack-generate`.
+pi-memctx retrieves prompt-relevant memory automatically before each turn. It uses qmd when available and grep fallback otherwise. If memory is insufficient or stale, Pi inspects the repository normally.
 
-pi-memctx starts with `profile:gateway` and persists config in `~/.config/pi-memctx/config.json`. Use `/memctx-profile gateway` to re-apply the default Memory Gateway profile, or `/memctx-config reset` to return to defaults.
+The gateway profile enables conservative automatic learning by default. After detailed turns, pi-memctx may save linked context, observations, runbooks, actions, decisions, and rich session snapshots as Markdown.
 
-Strict mode is off by default because the gateway first injects compact memory and only asks the agent to inspect source files when memory is insufficient, stale, or conflicting. You can toggle it when needed:
+## Search or save explicitly
+
+Ask the agent to search memory:
 
 ```txt
-/memctx-strict on
-/memctx-strict off
+Use memctx_search to find the deploy runbook.
 ```
 
-Advanced commands can override the active profile and mark it `custom`:
+Ask the agent to save durable memory:
 
 ```txt
-/memctx-auto-switch all
-/memctx-llm assist
+Save this as a decision: we use deterministic e2e packs for integration tests.
 ```
 
-Environment equivalents:
+## Advanced configuration
+
+Most users should keep defaults. Advanced behavior can be controlled with environment variables or `~/.config/pi-memctx/config.json`:
 
 ```bash
 MEMCTX_AUTO_SWITCH=off|cwd|prompt|all
@@ -78,24 +107,4 @@ MEMCTX_RETRIEVAL=auto|fast|balanced|deep|strict
 MEMCTX_RETRIEVAL_LATENCY_BUDGET_MS=1000
 MEMCTX_AUTOSAVE=off|suggest|confirm|auto
 MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=true
-```
-
-The gateway profile enables conservative automatic learning by default. Use `/memctx-doctor` when you need diagnostics:
-
-```txt
-/memctx-doctor
-```
-
-Ask the agent to search memory:
-
-```txt
-Use memctx_search to find the deploy runbook.
-```
-
-pi-memctx also retrieves prompt-relevant memory automatically before each turn. It uses qmd when available and grep fallback otherwise.
-
-Ask the agent to save durable memory:
-
-```txt
-Save this as a decision: we use deterministic e2e packs for integration tests.
 ```

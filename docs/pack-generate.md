@@ -1,96 +1,61 @@
-# Pack generation
+# Workspace memory initialization
 
-`/memctx-pack-generate` creates a memory pack from a directory of repositories.
-
-```txt
-/memctx-pack-generate /path/to/repos my-project
-```
-
-`/pack-generate` remains available as a deprecated compatibility alias.
-
-If no path is provided, pi-memctx scans the current working directory. If no slug is provided, it derives one from the scanned directory name.
-
-## Hybrid discovery and LLM enrichment
-
-The generator first performs deterministic local discovery so pack structure is always created even when no model is available. When `MEMCTX_LLM_MODE` is `assist` or `first` and a Pi model is selected, `/memctx-pack-generate` then runs token-conscious LLM enrichment.
-
-The local deterministic pass detects:
-
-- normal top-level repositories;
-- hidden repository allowlist entries such as `.github` and `.gitlab`;
-- Git remotes and current branch when available;
-- Node/TypeScript projects from `package.json` and lockfiles;
-- Go projects from `go.mod`;
-- infrastructure/config hints such as Docker, Terraform, Helm, Kubernetes, `infra/`, and CI workflows;
-- read-first docs such as `AGENTS.md`, `CLAUDE.md`, `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and selected `docs/**/*.md` files;
-- safe development commands from package scripts, Go manifests, and Make targets.
-
-## LLM-assisted deep enrichment
-
-When LLM enrichment is enabled, pi-memctx:
-
-1. builds a compact file inventory per active repository;
-2. asks the selected model to choose the highest-value files for architecture/API/data-model/integration understanding;
-3. extracts redacted snippets only from those selected files;
-4. asks the model to synthesize compact JSON;
-5. writes evidence-based architecture notes such as `20-context/<repo>-llm-architecture.md`;
-6. appends those notes to `00-system/indexes/context-index.md`.
-
-Token controls:
-
-- file inventory is metadata-first;
-- selected files are capped;
-- snippets are truncated;
-- sensitive filenames are skipped;
-- high-confidence secret-looking values are redacted before model use.
-
-Disable LLM use with:
-
-```bash
-MEMCTX_LLM_MODE=off
-```
-
-Prefer stronger LLM usage with:
-
-```bash
-MEMCTX_LLM_MODE=first
-```
-
-## Generated structure
-
-The generated pack uses the full memory-pack layout:
+`/memctx-init` creates or updates local Markdown memory for the current workspace.
 
 ```txt
-00-system/pi-agent/memory-manifest.md
-00-system/pi-agent/retrieval-protocol.md
-00-system/pi-agent/resource-map.md
-00-system/indexes/*.md
-10-user/
-20-context/overview.md
-20-context/<repo>.md
-20-context/<repo>-llm-architecture.md   # when LLM enrichment runs
-30-projects/<repo>.md
-40-actions/
-50-decisions/
-60-observations/workspace-repository-map.md
-70-runbooks/<repo>-development.md
-80-sessions/
+/memctx-init
+/memctx-init /path/to/repos my-project
+/memctx-init --no-deep
 ```
 
-Runbooks are generated only when safe setup/check commands are inferred. Deploy, production, release, publish, destructive, and credential-related commands are excluded from generated runbooks.
+The command performs deterministic local discovery so memory structure is always created even when no model is available. When a Pi model is selected, deep LLM enrichment starts in the background by default. Use `--no-deep` to skip LLM enrichment.
 
-## Safety and redaction
+Internally, workspace memory is stored as a Markdown pack. Most users do not need to manage packs directly.
 
-The generator skips sensitive file names such as `.env`, private keys, credential files, and secret files. It also redacts high-confidence secret-looking values before writing notes.
+## What gets generated
 
-Generated notes are context, not authority. Source-of-truth repository files, tests, CI, and live runtime facts override memory.
+`/memctx-init` creates a pack with:
 
-## Enriching an existing pack
+- `00-system/pi-agent/memory-manifest.md`
+- `00-system/pi-agent/resource-map.md`
+- `00-system/indexes/*.md`
+- `20-context/<repo>.md`
+- `30-projects/<repo>.md`
+- `60-observations/workspace-repository-map.md`
+- optional `70-runbooks/*` for safe generated development notes
 
-Use `/memctx-pack-enrich [source-dir]` to rerun deterministic repository inventory and optional LLM-assisted enrichment for the active pack without regenerating the entire pack. The command runs in the background so the Pi terminal remains responsive. If `source-dir` is omitted, pi-memctx tries the source directory recorded in the pack resource map.
+It also records the workspace path in `00-system/workspace-map.json` so future sessions inside that workspace or subdirectories can resolve the correct memory automatically.
 
-When a model is selected, `/memctx-pack-generate` starts LLM-assisted deep enrichment in the background by default after writing the deterministic pack. Use `/memctx-pack-generate --no-deep` to skip LLM enrichment. Generation always writes deterministic repository context, source inventory, stack signals, and safe source-of-truth pointers first.
+## Refreshing memory
 
-## Current limitations
+Use `/memctx-refresh` to rerun deterministic repository inventory and optional LLM-assisted enrichment for the active workspace memory without rebuilding everything:
 
-LLM enrichment is intentionally evidence-bounded: it summarizes selected redacted snippets and should not be treated as source of truth. If no model is selected or no API key is available, `/memctx-pack-generate` still produces the deterministic pack and skips LLM enrichment with a warning.
+```txt
+/memctx-refresh
+/memctx-refresh /path/to/repos
+/memctx-refresh --no-deep
+```
+
+The refresh runs in the background so the Pi terminal remains responsive.
+
+## Discovery behavior
+
+The generator looks for source-of-truth signals such as:
+
+- Git remotes and current branch
+- README/AGENTS/CLAUDE docs
+- package scripts and safe development commands
+- GitHub Actions workflows
+- Go/Node/Java/Python/Terraform/Kubernetes/YAML/SQL files
+- repository directory structure
+- selected source inventory and redacted excerpts
+
+Large files, hidden directories, dependency folders, and sensitive file names are skipped.
+
+## LLM enrichment
+
+When a model is selected, pi-memctx asks the model to synthesize compact architecture notes from selected redacted evidence. LLM-generated notes are context, not source of truth. Repository files still win when behavior matters.
+
+## Safety
+
+Generated content is sanitized before being written. Do not store secrets, credentials, tokens, customer data, or sensitive payloads in memory packs.

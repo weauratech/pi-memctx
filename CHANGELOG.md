@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.11.0] - 2026-05-03
+
+### Changed
+
+- Shift the public UX from user-managed packs to workspace memory: `/memctx-init`, `/memctx-status`, `/memctx-refresh`, `/memctx-doctor`, and `/memctx` are now the simplified command surface.
+- Remove noisy pack/profile/retrieval/autosave commands from the public command surface. Internal Markdown packs still back workspace memory.
+- Add workspace path mapping so initialized workspace memory can be resolved automatically from the current directory and subdirectories.
+- Simplify the status overlay wording to focus on memory readiness, hits, search backend, and learning status.
+- Update README and docs around workspace memory, simplified commands, and advanced environment-based configuration.
+
+
 ## [0.10.2] - 2026-05-03
 
 ### Changed

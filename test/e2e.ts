@@ -108,17 +108,15 @@ async function main() {
 
 	assert(!!tools.memctx_search, "memctx_search tool registered");
 	assert(!!tools.memctx_save, "memctx_save tool registered");
-	assert(!!commands["memctx-pack"], "/memctx-pack command registered");
-	assert(!!commands.pack, "/pack deprecated alias registered");
-	assert(!!commands["memctx-pack-generate"], "/memctx-pack-generate command registered");
-	assert(!!commands["pack-generate"], "/pack-generate deprecated alias registered");
-	assert(!!commands["memctx-retrieval"], "/memctx-retrieval command registered");
-	assert(!!commands["memctx-autosave"], "/memctx-autosave command registered");
-	assert(!!commands["memctx-save-queue"], "/memctx-save-queue command registered");
+	assert(!!commands["memctx"], "/memctx command registered");
+	assert(!!commands["memctx-init"], "/memctx-init command registered");
+	assert(!!commands["memctx-status"], "/memctx-status command registered");
+	assert(!!commands["memctx-refresh"], "/memctx-refresh command registered");
 	assert(!!commands["memctx-doctor"], "/memctx-doctor command registered");
-	assert(!!commands["memctx-pack-enrich"], "/memctx-pack-enrich command registered");
-	assert(!!commands["memctx-profile"], "/memctx-profile command registered");
-	assert(!!commands["memctx-config"], "/memctx-config command registered");
+	assert(!commands["memctx-pack"], "/memctx-pack command removed from public surface");
+	assert(!commands["memctx-pack-generate"], "/memctx-pack-generate command removed from public surface");
+	assert(!commands["memctx-retrieval"], "/memctx-retrieval command removed from public surface");
+	assert(!commands["memctx-autosave"], "/memctx-autosave command removed from public surface");
 	assert(!!hooks.session_start, "session_start hook registered");
 	assert(!!hooks.before_agent_start, "before_agent_start hook registered");
 	assert(!!hooks.session_before_compact, "session_before_compact hook registered");

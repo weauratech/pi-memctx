@@ -1,33 +1,64 @@
-# Persistence
+# Persistence and automatic learning
 
-`memctx_save` writes durable notes to the active pack. The gateway profile also runs a conservative post-turn memory curator by default: after each meaningful turn, pi-memctx looks for durable project knowledge, conventions, runbooks, architecture, business rules, completed actions, or explicit user/team preferences worth saving.
+pi-memctx can learn durable project knowledge after a turn and save it as local Markdown.
 
-## Supported types
+The default `gateway` profile uses conservative automatic learning. When a completed turn contains useful durable knowledge, pi-memctx may save linked notes such as:
 
-- `observation`: discovered fact about code, infra, behavior, or conventions.
-- `decision`: durable technical or architectural decision with rationale.
-- `action`: completed task or notable change.
-- `runbook`: repeatable procedure.
-- `context`: project, stack, or team context.
+- `20-context/` — workspace/repository/component context
+- `40-actions/` — completed work or delivered plans
+- `50-decisions/` — technical decisions with rationale
+- `60-observations/` — durable facts, requirements, caveats, patterns
+- `70-runbooks/` — repeatable procedures
+- `80-sessions/` — sanitized rich planning/discovery snapshots
 
-## Behavior
+## Rich persistence
 
-- Notes are Markdown files with frontmatter.
-- Existing notes with the same slug are appended to instead of overwritten.
-- Action notes include the current date in the filename.
-- Index files are updated when a matching index exists.
-- Common secret patterns are blocked before writing.
-- High-confidence curator candidates are saved automatically in `auto` mode; lower-confidence candidates are queued locally for review.
+When the final answer contains detailed planning, debugging, implementation, or repository-discovery content, pi-memctx enriches saved notes so future agents can reuse them without the original conversation. It also forces an `80-sessions` snapshot for large detailed turns when durable memory is saved.
 
-## Autosave and review
+Example post-turn UI:
 
 ```txt
-/memctx-autosave off|suggest|confirm|auto|status
-/memctx-save-queue list|approve <id>|reject <id>|clear
+memctx: learned 5 memories:
+   - context: [[packs/my-pack/20-context/payment-api|Payment API]] (updated)
+   - observation: [[packs/my-pack/60-observations/deploy-patterns|Deploy patterns]] (created)
+   - runbook: [[packs/my-pack/70-runbooks/deploy-payment-api|Deploy Payment API]] (created)
+   - action: [[packs/my-pack/40-actions/2026-05-02-prepared-rollout|Prepared rollout]] (created)
+   - session: [[packs/my-pack/80-sessions/rich-persistence-payment-api|Rich planning snapshot]] (created)
 ```
 
-`autosave=suggest` queues candidates and shows a widget. `autosave=confirm` asks immediately. `autosave=auto` writes directly when confidence is high and queues lower-confidence candidates when `MEMCTX_AUTOSAVE_QUEUE_LOW_CONFIDENCE=true` (the gateway default).
+Learned notes are cross-linked with `[[wikilinks]]` to improve navigation and future retrieval.
 
-## Limitations
+## Explicit saves
 
-Secret detection is defensive, not perfect. Review memory notes before publishing or sharing packs.
+The `memctx_save` tool remains available to the agent when you explicitly ask it to remember something:
+
+```txt
+Save this as a runbook: production deploy requires the release checklist and manual approval.
+```
+
+Supported note types:
+
+- `context`
+- `observation`
+- `runbook`
+- `decision`
+- `action`
+- `session`
+
+## Safety
+
+pi-memctx blocks or redacts secret-looking content before persistence. Do not ask it to save:
+
+- API keys
+- tokens
+- passwords
+- private keys
+- credentials
+- customer data
+- sensitive payloads
+
+If a secret-like value appeared in a turn, pi-memctx should summarize the risk without storing the value.
+
+## Advanced configuration
+
+Most users should keep the default learning mode. Advanced users can set `MEMCTX_AUTOSAVE=off|suggest|confirm|auto` or edit `~/.config/pi-memctx/config.json`.
