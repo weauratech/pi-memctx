@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ## [Unreleased]
 
 
+## [0.10.2] - 2026-05-03
+
+### Changed
+
+- Polish the README for launch with a stronger hero, automatic-learning examples, local/inspectable design notes, best-use-cases, status overlay, and a "Why not just RAG?" section.
+- Add GitHub issue templates for questions, memory-quality reports, and benchmark reports; improve bug and feature templates with privacy-safe fields.
+
+
 ## [0.10.1] - 2026-05-02
 
 ### Changed
