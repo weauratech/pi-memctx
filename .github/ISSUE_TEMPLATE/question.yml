@@ -1,0 +1,43 @@
+name: Question / help
+description: Ask for help using pi-memctx or understanding a workflow
+title: "question: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for asking. Please do not include secrets, tokens, private memory-pack content, proprietary code, or sensitive logs.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand or accomplish?
+      placeholder: |
+        Example: How should I use pi-memctx with a monorepo that has frontend, backend, and infra projects?
+    validations:
+      required: true
+  - type: textarea
+    id: current-workflow
+    attributes:
+      label: Current workflow
+      description: How are you using Pi and pi-memctx today?
+      placeholder: |
+        - How you installed pi-memctx:
+        - Whether you generated a pack:
+        - Command or prompt you ran:
+        - What you expected:
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        - OS:
+        - Pi version:
+        - pi-memctx version:
+        - Node version:
+        - qmd available? yes/no
+  - type: textarea
+    id: public-safe-context
+    attributes:
+      label: Public-safe context
+      description: Optional. Share only sanitized examples, synthetic repo structure, or public/open-source links.

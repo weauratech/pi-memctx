@@ -1,0 +1,56 @@
+name: Benchmark report
+description: Share reproducible benchmark results or performance regressions
+title: "benchmark: "
+labels: ["benchmark"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing benchmark data. Please use public/synthetic fixtures only. Do not upload private repo outputs, private memory packs, proprietary code, secrets, tokens, credentials, or customer data.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What did you measure, and what changed?
+      placeholder: |
+        Example: gateway reduced visible tokens but increased latency on a synthetic monorepo benchmark.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Benchmark command
+      description: Paste the exact public-safe command used.
+      placeholder: |
+        bash benchmark/setup.sh /tmp/pi-memctx-benchmark
+        BENCH_PROFILES="baseline gateway" bash benchmark/run.sh /tmp/pi-memctx-benchmark
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Include the summary table or key metrics.
+      placeholder: |
+        | Profile | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task |
+        |---|---:|---:|---:|---:|
+        | baseline | ... | ... | ... | ... |
+        | gateway | ... | ... | ... | ... |
+    validations:
+      required: true
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Fixture / workload
+      description: Describe the public or synthetic fixture. Link to it if possible.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        - OS:
+        - Pi version:
+        - pi-memctx version:
+        - Node version:
+        - qmd available? yes/no
+        - Model/provider, if public-safe:
