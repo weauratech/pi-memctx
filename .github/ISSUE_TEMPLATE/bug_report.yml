@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting a bug. Do not include secrets, tokens, private memory-pack content, or sensitive data.
+        Thanks for reporting a bug. Do not include secrets, tokens, private memory-pack content, proprietary code, customer data, or sensitive logs. Prefer sanitized examples or synthetic fixtures.
   - type: textarea
     id: what-happened
     attributes:
@@ -36,14 +36,26 @@ body:
       label: Environment
       placeholder: |
         - OS:
-        - Node version:
-        - Bun version:
         - Pi version/commit:
         - pi-memctx version/commit:
+        - Node version:
+        - Bun version:
+        - qmd available? yes/no
+        - Install source: npm/git/local
     validations:
       required: true
   - type: textarea
     id: logs
     attributes:
       label: Public-safe logs or screenshots
-      description: Remove secrets and private memory content before sharing.
+      description: Remove secrets, private memory content, proprietary code, customer data, and private paths before sharing.
+  - type: textarea
+    id: memctx-status
+    attributes:
+      label: pi-memctx status/config
+      description: Optional. Paste public-safe output from /memctx-profile status or npx pi-memctx doctor.
+      placeholder: |
+        - profile: gateway
+        - retrieval: balanced
+        - learn: auto/off/confirm
+        - search: qmd or grep fallback

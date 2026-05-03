@@ -1,0 +1,78 @@
+name: Memory quality / retrieval issue
+description: Report weak memory retrieval, shallow persistence, wrong note targeting, or noisy learning
+title: "memory: "
+labels: ["memory-quality"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when pi-memctx retrieved the wrong memory, injected weak context, saved shallow notes, targeted the wrong note, or learned too much/too little.
+
+        Do **not** include private repository content, customer data, secrets, tokens, credentials, or raw private memory packs. Prefer sanitized examples or synthetic fixtures.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Gateway retrieval/injection
+        - Automatic learning / persistence
+        - Note targeting / duplicate notes
+        - Pack generation / enrichment
+        - Search quality
+        - Status overlay / UX
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the memory behavior you observed.
+      placeholder: |
+        Example: pi-memctx saved only one short action note after a long planning turn, but it should have created context/runbook/session notes too.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened?
+      description: What memory should have been retrieved, injected, saved, linked, or updated?
+    validations:
+      required: true
+  - type: textarea
+    id: sanitized-example
+    attributes:
+      label: Sanitized example
+      description: Provide a public-safe prompt, generated note, search result, or synthetic repo layout.
+      placeholder: |
+        Prompt:
+        "How do I deploy service X?"
+
+        Saved note:
+        "..."
+
+        Expected notes:
+        - 20-context/service-x.md
+        - 70-runbooks/deploy-service-x.md
+        - 80-sessions/rich-persistence-service-x.md
+  - type: textarea
+    id: config
+    attributes:
+      label: pi-memctx config / status
+      description: Paste public-safe config/status if relevant.
+      placeholder: |
+        - profile: gateway
+        - retrieval: balanced
+        - learn: auto/off/confirm
+        - search: qmd or grep fallback
+        - active pack shape: synthetic/public-safe summary only
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        - OS:
+        - Pi version:
+        - pi-memctx version:
+        - Node version:
+        - qmd available? yes/no

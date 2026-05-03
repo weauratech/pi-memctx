@@ -3,3 +3,6 @@ contact_links:
   - name: Security vulnerability or sensitive data exposure
     url: https://github.com/weauratech/pi-memctx/security/policy
     about: Please do not report security issues publicly. Follow SECURITY.md.
+  - name: Pi coding agent
+    url: https://github.com/mariozechner/pi-coding-agent
+    about: For issues with Pi itself rather than pi-memctx.

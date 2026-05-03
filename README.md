@@ -5,7 +5,7 @@
 <h1 align="center">pi-memctx</h1>
 
 <p align="center">
-  <strong>Local-first memory context for Pi coding agents.</strong>
+  <strong>Stop making Pi rediscover your repo every session.</strong>
 </p>
 
 <p align="center">
@@ -18,6 +18,7 @@
 <p align="center">
   <a href="#quickstart">Quickstart</a> •
   <a href="#why-it-feels-like-magic">Why</a> •
+  <a href="#automatic-learning">Learning</a> •
   <a href="#benchmark">Benchmark</a> •
   <a href="#how-it-works">How it works</a> •
   <a href="#memory-packs">Packs</a> •
@@ -27,11 +28,11 @@
 
 ---
 
-**Stop paying your coding agent to rediscover what your project already knows.**
+> **Stop making your coding agent rediscover your repo.**
 
-`pi-memctx` gives [Pi](https://github.com/mariozechner/pi-coding-agent) a local, durable, Markdown-native memory layer. It searches your project memory before each prompt, injects only the context that matters, and lets the agent work normally when memory is not enough.
+`pi-memctx` gives [Pi](https://github.com/mariozechner/pi-coding-agent) a local, durable, Markdown-native memory layer. It searches project memory before each prompt, injects only compact/relevant context, lets Pi inspect the repo normally when memory is not enough, and learns durable discoveries after turns.
 
-No database server. No hosted memory vendor. No new workflow for your users. Just launch Pi and ask the question.
+No database server. No hosted memory vendor. No hidden black box. Just Markdown memory packs you can read, edit, grep, version, and sync.
 
 ## Quickstart
 
@@ -39,6 +40,12 @@ No database server. No hosted memory vendor. No new workflow for your users. Jus
 
 ```bash
 pi install npm:pi-memctx
+```
+
+Already installed? Update with:
+
+```bash
+pi update npm:pi-memctx
 ```
 
 Or install from GitHub:
@@ -103,6 +110,29 @@ Agent: Merge to main, GitHub Actions builds Docker and pushes to ECR,
 
 The difference is not a better prompt. It is **memory arriving before the model starts reasoning**.
 
+## Automatic learning
+
+After a rich planning, debugging, or repository-discovery turn, `pi-memctx` can persist multiple linked Markdown notes instead of one shallow summary:
+
+```txt
+memctx: learned 5 memories:
+   - context: [[packs/my-pack/20-context/payment-api|Payment API]] (updated)
+   - observation: [[packs/my-pack/60-observations/deploy-patterns|Deploy patterns]] (created)
+   - runbook: [[packs/my-pack/70-runbooks/deploy-payment-api|Deploy Payment API]] (created)
+   - action: [[packs/my-pack/40-actions/2026-05-02-prepared-rollout|Prepared rollout]] (created)
+   - session: [[packs/my-pack/80-sessions/rich-persistence-payment-api|Rich planning snapshot]] (created)
+```
+
+Learned notes are cross-linked with `[[wikilinks]]`, so future searches can recover the whole discovery: context, observations, runbooks, actions, decisions, and rich session snapshots.
+
+## Local and inspectable by design
+
+- Memories are Markdown files on your machine.
+- No hosted memory service or external vector database is required.
+- You can inspect, edit, delete, commit, or sync packs yourself.
+- Secret-looking values are blocked/redacted before persistence.
+- When memory is insufficient or stale, Pi falls back to normal repo inspection.
+
 ## Benchmark
 
 Latest local benchmark from the synthetic NovaPay fixture, 5 tasks, 1 repeat:
@@ -122,9 +152,12 @@ bash benchmark/run.sh /tmp/pi-memctx-benchmark-gateway-final
 
 Compared with baseline:
 
-| Profile | Latency | Provider tokens | Visible tokens | Tool calls | Quality |
-|---|---:|---:|---:|---:|---:|
-| gateway | **78.6% faster** | **12.9% fewer** | **59.9% fewer** | **100% fewer** | **+9 facts** |
+| Metric | Gateway vs baseline |
+|---|---:|
+| Latency | **78.6% faster** |
+| Visible tokens | **59.9% fewer** |
+| Tool calls | **100% fewer** |
+| Quality | **+9 facts** |
 
 Benchmarks are intentionally local and reproducible. Run them on your own projects:
 
@@ -154,7 +187,13 @@ Memory Gateway
 Pi agent answers normally
    ├─ uses memory when sufficient
    ├─ inspects the repo when memory is partial or stale
-   └─ can save durable discoveries back to Markdown
+   └─ after the turn, pi-memctx learns durable context back to Markdown
+      ├─ context
+      ├─ observations
+      ├─ runbooks
+      ├─ decisions
+      ├─ actions
+      └─ rich session snapshots
 ```
 
 The gateway does **not** replace the main LLM. It does the boring part first: finding the right project memory, compressing it, and preventing redundant tool exploration when the answer is already known.
@@ -194,40 +233,57 @@ packs/my-project/
     api.md
     web.md
     infra.md
+  40-actions/
+    2026-05-02-prepared-rollout.md
   50-decisions/
     001-hexagonal-architecture.md
     002-use-pgx.md
+  60-observations/
+    deploy-patterns.md
   70-runbooks/
     deploy.md
     terraform.md
+  80-sessions/
+    rich-persistence-payment-api.md
 ```
 
 Recommended note types:
 
-| Type | Use it for |
-|---|---|
-| `context` | Stack, services, repositories, conventions, environments. |
-| `decision` | Architecture and technical decisions with rationale. |
-| `runbook` | Repeatable operational procedures. |
-| `observation` | Durable facts discovered during work. |
-| `action` | Completed work, migrations, deploys, incident notes. |
+| Type | Directory | Use it for |
+|---|---|---|
+| `context` | `20-context/` | Stack, services, repositories, conventions, environments. |
+| `decision` | `50-decisions/` | Architecture and technical decisions with rationale. |
+| `observation` | `60-observations/` | Durable facts, requirements, caveats, structural discoveries. |
+| `runbook` | `70-runbooks/` | Repeatable operational procedures. |
+| `action` | `40-actions/` | Completed work, migrations, deploys, incident notes. |
+| `session` | `80-sessions/` | Sanitized rich planning/discovery snapshots for future retrieval. |
 
 ## Commands
+
+Most users only need the daily commands:
 
 | Command | Purpose |
 |---|---|
 | `/memctx-pack-generate` | Create a memory pack from the current workspace. If a model is selected, deep LLM enrichment starts in the background by default; use `--no-deep` to skip it. |
 | `/memctx-pack` | Select or show the active pack. |
+| `/memctx-profile gateway` | Re-apply the recommended profile. |
+| `/memctx-doctor` | Diagnose qmd, packs, and configuration. |
+
+<details>
+<summary>Advanced commands</summary>
+
+| Command | Purpose |
+|---|---|
 | `/memctx-pack-status` | Show active pack and retrieval status. |
-| `/memctx-profile` | Show or apply the `gateway` profile. |
 | `/memctx-config` | Show current config. |
 | `/memctx-retrieval` | Configure retrieval policy. |
-| `/memctx-autosave` | Advanced: configure automatic learning behavior. The default gateway profile uses conservative `auto`. |
-| `/memctx-save-queue` | Advanced: review queued lower-confidence memory candidates. |
-| `/memctx-doctor` | Diagnose qmd, packs, and configuration. |
+| `/memctx-autosave` | Configure automatic learning behavior. The default gateway profile uses conservative `auto`. |
+| `/memctx-save-queue` | Review queued lower-confidence memory candidates. |
 | `/memctx-pack-enrich` | Enrich a pack with deterministic repository inventory and optional LLM synthesis. Runs in the background. |
 
 Deprecated aliases such as `/pack` and `/pack-generate` are still registered for compatibility.
+
+</details>
 
 ## Tools
 
@@ -264,8 +320,41 @@ The tool supports:
 - `action`
 - `runbook`
 - `context`
+- `session`
 
 Secret-looking content is blocked.
+
+## Status overlay
+
+`pi-memctx` keeps a small status overlay in Pi:
+
+```txt
+🧠 my-pack · memory ready · 3 memory hits · search:qmd · profile:gateway · learn auto
+```
+
+This tells you which pack is active, whether memory was useful, which search backend is being used, and whether automatic learning is enabled.
+
+## Best use cases
+
+`pi-memctx` is especially useful when:
+
+- you work on large repos or monorepos;
+- Pi keeps rediscovering architecture and deploy flows;
+- your team has many services with repeated conventions;
+- you want local memory without a hosted vector database;
+- you want agent memory you can read, edit, grep, and version;
+- you want planning/discovery sessions to become durable project notes.
+
+## Why not just RAG?
+
+Most RAG setups retrieve documents at query time. `pi-memctx` is different:
+
+- it is local-first and file-based;
+- it stores durable memories as Markdown;
+- it learns after turns, not only before prompts;
+- it links related memories together;
+- it can fall back to repo inspection when memory is stale;
+- it does not require a hosted vector database.
 
 ## qmd integration
 
