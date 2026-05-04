@@ -12,7 +12,7 @@
   <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fweauratech%2Fpi-memctx&query=%24.stargazers_count&label=stars&color=yellow&style=flat&logo=github" alt="Stars"></a>
   <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
-  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.12.0-blue?style=flat" alt="Latest Release"></a>
+  <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.13.0-blue?style=flat" alt="Latest Release"></a>
 </p>
 
 <p align="center">
@@ -135,38 +135,64 @@ Learned notes are cross-linked with `[[wikilinks]]`, so future searches can reco
 
 ## Benchmark
 
-Latest local benchmark from the synthetic NovaPay fixture, 5 tasks, 1 repeat:
+### Real-world stress benchmark
 
-```bash
-QMD_PATH=/tmp/pi-memctx-qmd/node_modules/.bin/qmd \
-BENCH_REPEATS=1 \
-BENCH_PROFILES="baseline gateway" \
-BENCH_TIMEOUT=120 \
-bash benchmark/run.sh /tmp/pi-memctx-benchmark-gateway-final
-```
+A local stress benchmark was run against five anonymized real workspace-memory packs (`Pack 1` … `Pack 5`), with 5 repeats per task and two profiles: plain Pi with **no extensions** (`baseline`) and Pi with `pi-memctx` (`gateway`). The benchmark is read-only: no commits, deploys, applies, publishes, or cloud mutations.
 
-| Profile | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task | Failed tools/task | Quality |
-|---|---:|---:|---:|---:|---:|---:|
-| baseline | 24.2s | 2,315 | 594 | 5.4 | 0.2 | 12/22 |
-| gateway | 5.18s | 2,016 | 238 | 0.0 | 0.0 | 21/22 |
+| Profile | Runs | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task | Quality | Timeouts |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 25 | 196.6s | 34,385 | 2,503 | 27.2 | 206/255 | 1 |
+| gateway | 25 | 65.0s | 6,614 | 1,776 | 1.36 | 231/255 | 0 |
 
 Compared with baseline:
 
 | Metric | Gateway vs baseline |
 |---|---:|
-| Latency | **78.6% faster** |
-| Visible tokens | **59.9% fewer** |
-| Tool calls | **100% fewer** |
-| Quality | **+9 facts** |
+| Latency | **66.9% faster** |
+| Provider tokens | **80.8% fewer** |
+| Tool calls | **95.0% fewer** |
+| Quality | **+25 facts** |
+| Timeouts | **1 → 0** |
 
-Benchmarks are intentionally local and reproducible. Run them on your own projects:
+Per-pack quality in the same anonymized run:
+
+| Case | Baseline | Gateway |
+|---|---:|---:|
+| Pack 1 — deployment/GitOps runbook recall | 56/60 | **60/60** |
+| Pack 2 — Lambda/release workflow recall | **48/50** | 45/50 |
+| Pack 3 — package publishing configuration | **44/45** | 38/45 |
+| Pack 4 — long frontend-workflow continuation | 30/50 | **38/50** |
+| Pack 5 — observability troubleshooting runbook | 28/50 | **50/50** |
+
+The biggest change is not just quality; it is avoiding expensive rediscovery. The gateway keeps average tool use near one call per prompt while still allowing bounded fallback when memory is partial.
+
+### Reproducible synthetic benchmark
+
+The repository also includes a synthetic benchmark fixture you can run locally:
 
 ```bash
 bash benchmark/setup.sh /tmp/pi-memctx-benchmark
-QMD_PATH=$(pwd)/node_modules/.bin/qmd \
+BENCH_REPEATS=2 \
 BENCH_PROFILES="baseline gateway" \
 bash benchmark/run.sh /tmp/pi-memctx-benchmark
 ```
+
+Recent synthetic release-check run (`BENCH_REPEATS=5`, 25 tasks/profile, public fixture only):
+
+| Profile | Runs | Avg latency | Provider tokens/task | Visible tokens/task | Tool calls/task | Failed tools/task | Quality |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 25 | 22.0s | 2,450 | 571 | 6.2 | 0.4 | 63/110 |
+| gateway | 25 | 10.5s | 2,615 | 329 | 0.3 | 0.0 | 76/110 |
+
+Gateway result on the public fixture:
+
+- **52.2% faster** average latency.
+- **95.2% fewer tool calls**.
+- **42.4% fewer visible tokens** in assistant-facing prompt/output text.
+- **+13 scored facts** across the same prompts.
+- Provider token totals may move differently from visible tokens because model/provider cache accounting is included.
+
+Benchmarks are intentionally local and reproducible. Results depend on the model/provider, machine, cache behavior, and contents of your memory packs.
 
 ## How it works
 
@@ -177,8 +203,10 @@ User prompt
    │
    ▼
 Memory Gateway
-   ├─ detects the active pack
+   ├─ detects the active pack, including workspace maps and prompt mentions
+   ├─ supports Markdown packs that are real directories or symlinked directories
    ├─ retrieves relevant Markdown memories with qmd or grep fallback
+   ├─ scopes qmd collections by pack path to avoid cross-vault index reuse
    ├─ ranks candidates with cheap semantic coverage
    ├─ builds a compact local memory summary
    └─ injects only useful context
@@ -197,6 +225,8 @@ Pi agent answers normally
 ```
 
 The gateway does **not** replace the main LLM. It does the boring part first: finding the right project memory, compressing it, and preventing redundant tool exploration when the answer is already known.
+
+When multiple packs are available, explicit pack names in the prompt take priority over weaker aliases from other packs. This keeps multi-workspace setups predictable without hardcoded company, domain, language, or technology rules.
 
 ## Profile
 
@@ -284,6 +314,22 @@ Parameters:
 | `limit` | number | `5` |
 
 When the Memory Gateway already injected sufficient memory, the agent is instructed not to call `memctx_search` again. That keeps answers fast and prevents duplicate context retrieval.
+
+## Gateway diagnostics
+
+For memory-quality investigations, enable opt-in debug snapshots:
+
+```bash
+MEMCTX_GATEWAY_DEBUG=1 pi -e pi-memctx
+```
+
+Snapshots are written under:
+
+```txt
+$TMPDIR/pi-memctx-gateway-debug/
+```
+
+They include sanitized/truncated prompt terms, active pack, candidate paths, selected facts, coverage, fallback budget, and top scored candidate lines. Debug is off by default, best-effort only, and intended for local diagnosis; do not commit debug snapshots because they may contain project-specific paths or note titles.
 
 ### `memctx_save`
 

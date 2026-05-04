@@ -281,28 +281,28 @@ import registerExtension from "../index.js";
 // ==========================================================================
 
 describe("Memory Gateway coverage guardrails", () => {
-	test("extracts multi-part deployment requirements from prompts", () => {
+	test("extracts explicit structural requirements without domain-specific categories", () => {
 		const labels = buildPromptRequirements("Explique deploy dos Lambdas incluindo repos, tags, GitHub Actions, S3, Terraform e aprovação.").map((item) => item.label);
-		expect(labels).toContain("repositories involved");
-		expect(labels).toContain("tags/versioning");
-		expect(labels).toContain("GitHub Actions/workflows");
-		expect(labels).toContain("S3/artifacts");
-		expect(labels).toContain("Terraform/foundation");
-		expect(labels).toContain("approval/manual gate");
+		expect(labels).toContain("Lambdas");
+		expect(labels).toContain("GitHub");
+		expect(labels).toContain("Actions");
+		expect(labels).toContain("S3");
+		expect(labels).toContain("Terraform");
 	});
 
-	test("marks missing critical checklist items when memory is partial", () => {
-		const requirements = buildPromptRequirements("Explique diagnóstico de root traces no Grafana/Tempo com Quarkus, OTel, Datadog e porta 9001.");
+	test("marks missing critical structural items when memory is partial", () => {
+		const requirements = buildPromptRequirements("Explain RootTrace debugging in AlphaUI/BetaTrace with GammaRuntime, OTel, DeltaAgent, and port 9001.");
 		const coverage = evaluateGatewayCoverage(requirements, [{
 			id: "c1",
-			path: "70-runbooks/observability.md",
-			content: "Grafana Tempo root traces with Quarkus OTel configuration are documented here.",
+			path: "70-runbooks/system-debugging.md",
+			content: "AlphaUI BetaTrace RootTrace with GammaRuntime OTel configuration are documented here.",
 			source: "none",
 		}]);
-		expect(coverage.coveredItems).toContain("Grafana/Tempo symptom");
-		expect(coverage.coveredItems).toContain("Quarkus OTel configuration");
-		expect(coverage.criticalMissing).toContain("Datadog interaction");
-		expect(coverage.criticalMissing).toContain("management port/service");
+		expect(coverage.coveredItems).toContain("AlphaUI/BetaTrace");
+		expect(coverage.coveredItems).toContain("GammaRuntime");
+		expect(coverage.coveredItems).toContain("OTel");
+		expect(coverage.criticalMissing).toContain("DeltaAgent");
+		expect(coverage.criticalMissing).toContain("9001");
 	});
 });
 
@@ -1122,7 +1122,8 @@ describe("before_agent_start context injection", () => {
 
 		expect(result.systemPrompt).toContain("pi-memctx Memory Gateway");
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
-		expect(result.systemPrompt).toContain("inspect repo/docs/workflows");
+		expect(result.systemPrompt).toContain("Inspect repo/docs/workflows");
+		expect(result.systemPrompt).toContain("source read/search tools: max 3");
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 		expect(result.systemPrompt).not.toContain("Tool use is forbidden");
 		expect(result.systemPrompt).not.toContain("Do not call memctx_search, bash, or read");

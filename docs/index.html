@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>pi-memctx — Local memory for Pi coding agent</title>
+  <meta name="description" content="pi-memctx gives Pi a local Markdown memory gateway that reduces repo rediscovery, tool calls, latency, and token waste." />
+  <style>
+    :root {
+      --ink: #17130d;
+      --paper: #f7efe0;
+      --paper-2: #fff9ec;
+      --line: rgba(23, 19, 13, .18);
+      --muted: #6d6250;
+      --green: #166b4b;
+      --green-2: #d6f6df;
+      --amber: #e3aa2f;
+      --orange: #e86f3d;
+      --blue: #2f5f9c;
+      --shadow: 0 28px 80px rgba(43, 31, 12, .18);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 12% 10%, rgba(232,111,61,.22), transparent 28rem),
+        radial-gradient(circle at 86% 0%, rgba(47,95,156,.18), transparent 34rem),
+        linear-gradient(135deg, var(--paper), #efe1c8 58%, #ead7b7);
+      font-family: Georgia, 'Times New Roman', serif;
+      min-height: 100vh;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .32;
+      background-image:
+        linear-gradient(rgba(23,19,13,.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(23,19,13,.045) 1px, transparent 1px);
+      background-size: 34px 34px;
+      mask-image: linear-gradient(to bottom, #000, transparent 80%);
+    }
+    a { color: inherit; }
+    .wrap { width: min(1180px, calc(100% - 36px)); margin: 0 auto; }
+    header { padding: 28px 0 12px; position: relative; z-index: 1; }
+    nav { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 800; letter-spacing: -.04em; font-size: 24px; }
+    .mark { width: 40px; height: 40px; display: grid; place-items: center; border: 2px solid var(--ink); border-radius: 12px; background: var(--paper-2); box-shadow: 5px 5px 0 var(--ink); }
+    .links { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .links a, .btn { text-decoration: none; border: 1px solid var(--line); background: rgba(255,249,236,.64); padding: 10px 14px; border-radius: 999px; font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .btn.primary { background: var(--ink); color: var(--paper-2); border-color: var(--ink); box-shadow: 6px 6px 0 var(--amber); }
+    .hero { display: grid; grid-template-columns: 1.08fr .92fr; gap: 34px; padding: 72px 0 52px; position: relative; z-index: 1; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line); padding: 8px 12px; border-radius: 999px; background: rgba(255,249,236,.72); font: 800 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--green); }
+    h1 { margin: 20px 0 18px; font-size: clamp(54px, 9vw, 116px); line-height: .86; letter-spacing: -.085em; max-width: 820px; }
+    .hero p { font-size: clamp(19px, 2.1vw, 26px); line-height: 1.28; color: #3b3328; max-width: 720px; margin: 0 0 28px; }
+    .actions { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+    .terminal { background: #18140f; color: #f9efd9; border-radius: 28px; padding: 20px; box-shadow: var(--shadow); border: 1px solid rgba(255,255,255,.12); transform: rotate(1.2deg); }
+    .terminal .bar { display: flex; gap: 7px; margin-bottom: 18px; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--orange); }
+    .dot:nth-child(2) { background: var(--amber); } .dot:nth-child(3) { background: #57bf72; }
+    pre { margin: 0; white-space: pre-wrap; font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .green { color: #91e2ad; } .gold { color: #ffd27a; } .blue { color: #9ec4ff; }
+    .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 26px 0 0; }
+    .metric { background: rgba(255,249,236,.78); border: 1px solid var(--line); border-radius: 22px; padding: 18px; box-shadow: 8px 8px 0 rgba(23,19,13,.08); }
+    .metric strong { display: block; font-size: clamp(30px, 4vw, 48px); letter-spacing: -.07em; }
+    .metric span { color: var(--muted); font: 800 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; }
+    section { padding: 54px 0; position: relative; z-index: 1; }
+    .section-title { font-size: clamp(38px, 5vw, 72px); line-height: .92; letter-spacing: -.07em; margin: 0 0 20px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+    .card { background: rgba(255,249,236,.74); border: 1px solid var(--line); border-radius: 26px; padding: 24px; box-shadow: var(--shadow); }
+    .card h3 { margin: 0 0 10px; font-size: 26px; letter-spacing: -.04em; }
+    .card p, .card li { color: #4d4437; line-height: 1.55; font-size: 16px; }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; border-radius: 24px; background: rgba(255,249,236,.82); box-shadow: var(--shadow); }
+    th, td { padding: 16px 18px; border-bottom: 1px solid var(--line); text-align: left; }
+    th { font: 900 12px ui-monospace, SFMono-Regular, Menlo, monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+    td { font-size: 18px; }
+    tr:last-child td { border-bottom: 0; }
+    .win { color: var(--green); font-weight: 900; }
+    .callout { display: grid; grid-template-columns: .75fr 1.25fr; gap: 24px; align-items: center; background: var(--ink); color: var(--paper-2); border-radius: 34px; padding: 30px; box-shadow: var(--shadow); }
+    .callout h2 { margin: 0; font-size: clamp(36px, 5vw, 76px); line-height: .9; letter-spacing: -.075em; }
+    .callout p { color: #e9dcc4; line-height: 1.55; font-size: 18px; }
+    footer { padding: 44px 0 70px; color: var(--muted); font: 700 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    @media (max-width: 860px) {
+      .hero, .callout { grid-template-columns: 1fr; }
+      .metrics, .grid-3 { grid-template-columns: 1fr; }
+      nav { align-items: flex-start; flex-direction: column; }
+      .terminal { transform: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <nav>
+      <div class="brand"><span class="mark">🗃️</span> pi-memctx</div>
+      <div class="links">
+        <a href="#benchmark">Benchmark</a>
+        <a href="#how">How it works</a>
+        <a href="https://github.com/weauratech/pi-memctx">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero wrap">
+      <div>
+        <span class="eyebrow">Local-first memory gateway for Pi</span>
+        <h1>Stop paying the repo rediscovery tax.</h1>
+        <p>pi-memctx gives Pi a durable Markdown memory layer: it recalls runbooks, architecture decisions, project context, and prior discoveries before the model starts burning tools and tokens.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://github.com/weauratech/pi-memctx#quickstart">Install pi-memctx</a>
+          <a class="btn" href="#benchmark">See benchmark</a>
+        </div>
+        <div class="metrics" aria-label="Key benchmark deltas">
+          <div class="metric"><strong>66.9%</strong><span>faster in real-world stress run</span></div>
+          <div class="metric"><strong>95.0%</strong><span>fewer tool calls</span></div>
+          <div class="metric"><strong>80.8%</strong><span>fewer provider tokens</span></div>
+          <div class="metric"><strong>+25</strong><span>scored quality facts</span></div>
+        </div>
+      </div>
+      <aside class="terminal" aria-label="Example terminal output">
+        <div class="bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+        <pre><span class="gold">$</span> pi -e pi-memctx
+
+<span class="blue">User</span>: How do we deploy gateway?
+
+<span class="green">Memory Gateway Brief</span>
+Status: sufficient
+Evidence:
+- GitHub Actions builds image
+- ECR stores release artifact
+- Helm values are updated
+- ArgoCD syncs production
+
+<span class="blue">Assistant</span>: Use the release workflow,
+verify the image in ECR, then approve
+ArgoCD sync for production.</pre>
+      </aside>
+    </section>
+
+    <section id="benchmark" class="wrap">
+      <h2 class="section-title">Benchmark: same prompts, less rediscovery.</h2>
+      <div class="card">
+        <p><strong>Real-world stress benchmark:</strong> 5 anonymized memory packs, 5 repeats per task, plain Pi baseline vs Pi with pi-memctx gateway. Names are anonymized as Pack 1–5; raw private pack data is not published.</p>
+      </div>
+      <br />
+      <table>
+        <thead><tr><th>Profile</th><th>Runs</th><th>Avg latency</th><th>Provider tokens/task</th><th>Tool calls/task</th><th>Quality</th><th>Timeouts</th></tr></thead>
+        <tbody>
+          <tr><td>Baseline</td><td>25</td><td>196.6s</td><td>34,385</td><td>27.2</td><td>206/255</td><td>1</td></tr>
+          <tr><td class="win">Gateway</td><td>25</td><td class="win">65.0s</td><td class="win">6,614</td><td class="win">1.36</td><td class="win">231/255</td><td class="win">0</td></tr>
+        </tbody>
+      </table>
+      <br />
+      <table>
+        <thead><tr><th>Public synthetic release check</th><th>Baseline</th><th>Gateway</th><th>Delta</th></tr></thead>
+        <tbody>
+          <tr><td>Average latency</td><td>22.0s</td><td class="win">10.5s</td><td class="win">52.2% faster</td></tr>
+          <tr><td>Tool calls/task</td><td>6.2</td><td class="win">0.3</td><td class="win">95.2% fewer</td></tr>
+          <tr><td>Visible tokens/task</td><td>571</td><td class="win">329</td><td class="win">42.4% fewer</td></tr>
+          <tr><td>Quality</td><td>63/110</td><td class="win">76/110</td><td class="win">+13 facts</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="how" class="wrap">
+      <h2 class="section-title">How it works</h2>
+      <div class="grid-3">
+        <article class="card"><h3>1. Markdown memory</h3><p>Your workspace knowledge lives as local Markdown: context, observations, runbooks, decisions, actions, and session snapshots.</p></article>
+        <article class="card"><h3>2. Gateway retrieval</h3><p>Before Pi answers, the extension detects the active pack, searches relevant notes with qmd or grep fallback, and injects a compact brief.</p></article>
+        <article class="card"><h3>3. Bounded fallback</h3><p>If memory is partial, Pi can still inspect source files, but with a budget to avoid runaway rediscovery.</p></article>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <div class="callout">
+        <h2>Local. Inspectable. Open source.</h2>
+        <div>
+          <p>No hosted memory vendor. No hidden database. No domain-specific hardcode. pi-memctx is designed for many languages, countries, teams, and stacks.</p>
+          <p><a class="btn primary" href="https://github.com/weauratech/pi-memctx">View on GitHub</a></p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap">Benchmarks vary by provider, machine, cache behavior, and memory quality. Real-world pack names are anonymized.</footer>
+</body>
+</html>

@@ -19,6 +19,7 @@
  */
 
 import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
@@ -76,6 +77,12 @@ let qmdAvailable = false;
 let qmdBin = "";
 let qmdCollection = "";
 let strictMode = parseStrictModeEnv(process.env.MEMCTX_STRICT);
+
+function qmdCollectionName(pack: string, packPath: string): string {
+	const hash = createHash("sha1").update(path.resolve(packPath)).digest("hex").slice(0, 10);
+	const safePack = slugify(pack || "memory").slice(0, 40) || "memory";
+	return `memctx-${safePack}-${hash}`;
+}
 
 type SearchMode = "keyword" | "semantic" | "deep";
 type QmdSource = "env" | "optional-dependency" | "local-dependency" | "bundled" | "path" | "missing";
@@ -484,8 +491,17 @@ export function listPacks(packsDir: string): string[] {
 	if (!fs.existsSync(packsDir)) return [];
 	const entries = fs.readdirSync(packsDir, { withFileTypes: true });
 	return entries
-		.filter((e) => e.isDirectory() && !e.name.startsWith("."))
-		.map((e) => e.name);
+		.filter((entry) => {
+			if (entry.name.startsWith(".")) return false;
+			if (entry.isDirectory()) return true;
+			if (!entry.isSymbolicLink()) return false;
+			try {
+				return fs.statSync(path.join(packsDir, entry.name)).isDirectory();
+			} catch {
+				return false;
+			}
+		})
+		.map((entry) => entry.name);
 }
 
 /**
@@ -948,6 +964,172 @@ function isBroadProjectPrompt(prompt: string): boolean {
 	return broadTerms.filter((term) => promptTerms.has(term)).length >= 2;
 }
 
+function promptStructuralTerms(prompt: string): string[] {
+	const terms = new Set<string>();
+	const add = (value: string) => {
+		const normalized = normalizeSearchText(value.trim());
+		if (normalized.length >= 3) terms.add(normalized);
+		for (const part of normalized.split(/[._\/\-\s]+/)) {
+			if (part.length >= 4) terms.add(part);
+		}
+	};
+	for (const match of prompt.matchAll(/`([^`]{3,80})`/g)) add(match[1]);
+	for (const match of prompt.matchAll(/\b[\p{L}\p{N}][\p{L}\p{N}_.\/-]*[._\/-][\p{L}\p{N}_.\/-]*\b/gu)) add(match[0]);
+	for (const match of prompt.matchAll(/\b(?:[\p{Lu}]{2,}[\p{L}\p{N}]*|[\p{L}]+[\p{Lu}][\p{L}\p{N}]*|[\p{L}]*\d+[\p{L}\p{N}]*)\b/gu)) add(match[0]);
+	return [...terms].filter((term) => term.length >= 3).slice(0, 28);
+}
+
+function extractMemoryHeadings(content: string, limit = 8): string[] {
+	const headings: string[] = [];
+	for (const line of stripMarkdownMetadata(content).split("\n")) {
+		const match = line.match(/^#{1,4}\s+(.+)$/);
+		if (!match) continue;
+		const heading = normalizeContextLine(match[1]);
+		if (heading.length >= 3 && !headings.includes(heading)) headings.push(heading);
+		if (headings.length >= limit) break;
+	}
+	return headings;
+}
+
+function denseMemoryLineScore(line: string): number {
+	let score = 0;
+	if (/`[^`]+`/.test(line)) score += 2;
+	if (/[\p{L}\p{N}_.-]+\/[\p{L}\p{N}_./-]+/u.test(line)) score += 2;
+	if (/[\p{L}\p{N}_-]+\.[\p{L}\p{N}_-]{2,}\b/u.test(line)) score += 1;
+	if (/[:=]|→|->/.test(line)) score += 1;
+	if (/^\s*(?:[-*]|\d+[.)])\s+/.test(line)) score += 1;
+	if (/\b[\p{Lu}]{2,}[\p{L}\p{N}]*\b/u.test(line)) score += 1;
+	if (/\b[\p{L}]*\d+[\p{L}\p{N}]*\b/u.test(line)) score += 1;
+	if (/\b[\p{L}]+[\p{Lu}][\p{L}\p{N}]*\b/u.test(line)) score += 1;
+	return score;
+}
+
+function extractDenseMemoryLines(content: string, limit = 12): string[] {
+	const lines = stripMarkdownMetadata(content).split("\n");
+	const scored = lines
+		.map((line, index) => {
+			const cleaned = normalizeContextLine(line.trim().replace(/^[-*#\s]+/, ""));
+			return { line: cleaned, score: denseMemoryLineScore(line), index };
+		})
+		.filter((item) => item.line.length >= 10 && item.line.length <= 260 && item.score >= 2 && !/^Query:/i.test(item.line))
+		.sort((a, b) => b.score - a.score || a.index - b.index);
+	const selected: string[] = [];
+	for (const item of scored) {
+		if (!selected.includes(item.line)) selected.push(item.line);
+		if (selected.length >= limit) break;
+	}
+	return selected;
+}
+
+function extractMemoryIdentifiers(content: string, limit = 24): string[] {
+	const identifiers = new Set<string>();
+	for (const line of stripMarkdownMetadata(content).split("\n")) {
+		for (const match of line.matchAll(/`([^`]{3,80})`/g)) identifiers.add(normalizeContextLine(match[1]));
+		for (const match of line.matchAll(/\b[\p{L}\p{N}][\p{L}\p{N}_.\/-]*[._\/-][\p{L}\p{N}_.\/-]*\b/gu)) identifiers.add(normalizeContextLine(match[0]));
+		for (const match of line.matchAll(/\b(?:[\p{Lu}]{2,}[\p{L}\p{N}]*|[\p{L}]+[\p{Lu}][\p{L}\p{N}]*|[\p{L}]*\d+[\p{L}\p{N}]*)\b/gu)) identifiers.add(normalizeContextLine(match[0]));
+		if (identifiers.size >= limit * 2) break;
+	}
+	return [...identifiers].filter((item) => item.length >= 3).slice(0, limit);
+}
+
+function buildEphemeralFactCardCandidate(candidate: GatewayCandidate): GatewayCandidate | null {
+	const headings = extractMemoryHeadings(candidate.content, 8);
+	const denseLines = extractDenseMemoryLines(candidate.content, 12);
+	const identifiers = extractMemoryIdentifiers(`${candidate.path}\n${candidate.content}`, 24);
+	if (headings.length === 0 && denseLines.length === 0 && identifiers.length === 0) return null;
+	const sections = [
+		`Source: ${candidate.path}`,
+		headings.length ? ["Headings:", ...headings.map((item) => `- ${item}`)].join("\n") : "",
+		denseLines.length ? ["Key facts:", ...denseLines.map((item) => `- ${item}`)].join("\n") : "",
+		identifiers.length ? `Identifiers: ${identifiers.slice(0, 16).join(", ")}` : "",
+	].filter(Boolean).join("\n");
+	return {
+		id: `${candidate.id}-card`,
+		path: `${candidate.path}#fact-card`,
+		content: truncate(sections, 1200),
+		source: candidate.source,
+	};
+}
+
+function readCandidateFullContent(packPath: string, candidate: GatewayCandidate): string {
+	const basePath = candidate.path.split("#")[0];
+	if (!basePath || basePath.startsWith("qmd://") || path.isAbsolute(basePath) || basePath.includes("..")) return candidate.content;
+	const fullPath = path.join(packPath, basePath);
+	const content = readFileSafe(fullPath);
+	return content?.trim() ? content : candidate.content;
+}
+
+function splitMemoryHeadingChunks(content: string): Array<{ heading: string; content: string; index: number }> {
+	const lines = stripMarkdownMetadata(content).split("\n");
+	const chunks: Array<{ heading: string; content: string; index: number }> = [];
+	let heading = "Overview";
+	let buffer: string[] = [];
+	const flush = () => {
+		const body = buffer.join("\n").trim();
+		if (body.length >= 20) chunks.push({ heading, content: body, index: chunks.length });
+		buffer = [];
+	};
+	for (const line of lines) {
+		const match = line.match(/^#{1,4}\s+(.+)$/);
+		if (match) {
+			flush();
+			heading = normalizeContextLine(match[1]) || heading;
+			continue;
+		}
+		buffer.push(line);
+	}
+	flush();
+	if (chunks.length > 0) return chunks;
+	const paragraphs = stripMarkdownMetadata(content).split(/\n\s*\n/g).map((part) => part.trim()).filter((part) => part.length >= 20);
+	return paragraphs.slice(0, 8).map((part, index) => ({ heading: `Chunk ${index + 1}`, content: part, index }));
+}
+
+function buildHeadingChunkCandidates(packPath: string, prompt: string, candidates: GatewayCandidate[], limit = 10): GatewayCandidate[] {
+	const terms = promptStructuralTerms(prompt);
+	const scored: Array<{ candidate: GatewayCandidate; score: number; index: number }> = [];
+	for (const candidate of candidates) {
+		const fullContent = readCandidateFullContent(packPath, candidate);
+		const chunks = splitMemoryHeadingChunks(fullContent);
+		const candidatePath = normalizeSearchText(candidate.path);
+		const pathHits = terms.filter((term) => candidatePath.includes(term)).length;
+		for (const chunk of chunks) {
+			const text = normalizeSearchText(`${chunk.heading}\n${chunk.content}`);
+			const termHits = terms.filter((term) => text.includes(term)).length;
+			const denseScore = extractDenseMemoryLines(chunk.content, 4).length;
+			const score = (pathHits * 3) + (termHits * 2) + denseScore + Math.max(0, 3 - chunk.index) * 0.15;
+			if (score <= 0 && scored.length > 0) continue;
+			const previous = chunks[chunk.index - 1];
+			const next = chunks[chunk.index + 1];
+			const previousDense = previous ? extractDenseMemoryLines(previous.content, 2) : [];
+			const nextDense = next ? extractDenseMemoryLines(next.content, 2) : [];
+			const contextParts = [
+				`Source: ${candidate.path}`,
+				`Heading: ${chunk.heading}`,
+				previous ? `Previous heading: ${previous.heading}` : "",
+				previousDense.length ? `Previous key facts:\n${previousDense.map((line) => `- ${line}`).join("\n")}` : "",
+				truncate(chunk.content, 1100),
+				next ? `Next heading: ${next.heading}` : "",
+				nextDense.length ? `Next key facts:\n${nextDense.map((line) => `- ${line}`).join("\n")}` : "",
+			].filter(Boolean);
+			const content = contextParts.join("\n");
+			scored.push({
+				candidate: {
+					id: `${candidate.id}-chunk-${chunk.index + 1}`,
+					path: `${candidate.path}#${slugify(chunk.heading)}`,
+					content,
+					source: candidate.source,
+				},
+				score,
+				index: scored.length,
+			});
+		}
+	}
+	return scored
+		.sort((a, b) => b.score - a.score || a.index - b.index)
+		.map((item) => item.candidate)
+		.slice(0, limit);
+}
+
 function gatewayPackCandidates(packPath: string, prompt: string, existing: GatewayCandidate[], limit = 8): GatewayCandidate[] {
 	const seen = new Set(existing.map((candidate) => candidate.path));
 	const broadProject = isBroadProjectPrompt(prompt);
@@ -986,8 +1168,24 @@ function gatewayPackCandidates(packPath: string, prompt: string, existing: Gatew
 		return [...contextCandidates, ...support];
 	}
 	const { anchors, ranked } = rankCandidates(prompt, all);
-	const selected = selectCoverageCandidates(anchors, ranked, limit).map((item) => item.candidate);
-	const selectedPaths = new Set(selected.map((candidate) => candidate.path));
+	const structuralTerms = promptStructuralTerms(prompt);
+	const pathMatches = structuralTerms.length === 0 ? [] : all
+		.map((candidate) => {
+			const rel = normalizeSearchText(candidate.path);
+			const hits = structuralTerms.filter((term) => rel.includes(term));
+			return { candidate, hits };
+		})
+		.filter((item) => item.hits.length > 0)
+		.sort((a, b) => b.hits.length - a.hits.length || a.candidate.path.localeCompare(b.candidate.path))
+		.map((item) => item.candidate);
+	const selected: GatewayCandidate[] = [];
+	const selectedPaths = new Set<string>();
+	for (const candidate of [...pathMatches, ...selectCoverageCandidates(anchors, ranked, limit).map((item) => item.candidate)]) {
+		if (selectedPaths.has(candidate.path)) continue;
+		selected.push(candidate);
+		selectedPaths.add(candidate.path);
+		if (selected.length >= limit) break;
+	}
 	const requirements = buildPromptRequirements(prompt);
 	if (requirements.length > 0) {
 		const coverageBoosts = all
@@ -1058,49 +1256,40 @@ export type GatewayCoverage = {
 
 function addGatewayRequirement(items: GatewayRequirement[], label: string, aliases: string[], critical = false) {
 	if (items.some((item) => item.label === label)) return;
-	items.push({ label, aliases: [label, ...aliases].map((alias) => normalizeSearchText(alias)).filter(Boolean), critical });
+	const normalizedAliases = new Set<string>();
+	for (const alias of [label, ...aliases]) {
+		const normalized = normalizeSearchText(alias);
+		if (!normalized) continue;
+		normalizedAliases.add(normalized);
+		const spaced = normalizeSearchText(alias.replace(/[._/-]+/g, " "));
+		if (spaced) normalizedAliases.add(spaced);
+		const compact = normalizeSearchText(alias.replace(/[._/-]+/g, ""));
+		if (compact) normalizedAliases.add(compact);
+	}
+	items.push({ label, aliases: [...normalizedAliases], critical });
 }
 
 export function buildPromptRequirements(prompt: string): GatewayRequirement[] {
-	const text = normalizeSearchText(prompt);
 	const items: GatewayRequirement[] = [];
-	const asksStructure = /\b(estrutura|structure|arquitetura|architecture|como funciona|funciona|works|overview)\b/.test(text);
-	const asksDeploy = /\b(deploy|deployment|release|versionamento|versioning|pipeline|github actions|argocd|argo|helm|kustomize|terraform|s3|lambda|production|prod|staging|hml)\b/.test(text);
-	const asksOperations = /\b(cuidados|safety|safe|dangerous|perigos|operacionais|rollback|aprovacao|approval|manual)\b/.test(text);
-	const asksContinuation = /\b(retome|continue|continuar|resume|frontend-workflow|o que j[aá] estava|bloquead|proximos passos|next steps|p0|p1)\b/.test(text);
-	const asksObservability = /\b(root traces?|tempo|grafana|otel|opentelemetry|quarkus|datadog|loki|traceid|observability|observabilidade)\b/.test(text);
-
-	if (asksStructure) addGatewayRequirement(items, "structure/architecture", ["estrutura", "architecture", "directory", "folders"], true);
-	if (/\b(ambiente|ambientes|environment|environments|hml|staging|production|prod|pci|prd)\b/.test(text)) addGatewayRequirement(items, "environments", ["ambientes", "environment", "staging", "production", "prod", "prd", "pci"], true);
-	if (/\b(helm|values\.yaml|values)\b/.test(text)) addGatewayRequirement(items, "Helm/values", ["helm", "values.yaml", "values"], true);
-	if (/\b(kustomize|overlay|overlays)\b/.test(text)) addGatewayRequirement(items, "Kustomize/overlays", ["kustomize", "overlay", "overlays", "kustomization.yaml"], true);
-	if (/\b(github actions|workflow|workflows|pipeline|ci|ci\/cd)\b/.test(text)) addGatewayRequirement(items, "GitHub Actions/workflows", ["github actions", "workflow", "workflows", "pipeline", ".github/workflows"], true);
-	if (/\b(argocd|argo cd|argo)\b/.test(text)) addGatewayRequirement(items, "ArgoCD flow", ["argocd", "argo cd", "sync", "applicationset", "application"], true);
-	if (asksDeploy) addGatewayRequirement(items, "deploy/release flow", ["deploy", "deployment", "release", "promotion", "fluxo", "flow"], true);
-	if (/\b(repo|repos|repository|repositorios?|envolvidos)\b/.test(text)) addGatewayRequirement(items, "repositories involved", ["repo", "repository", "repositories", "repositórios", "foundation", "api"], true);
-	if (/\b(tag|tags|versionamento|versioning|semver)\b/.test(text)) addGatewayRequirement(items, "tags/versioning", ["tag", "tags", "versioning", "versionamento", "semver"], true);
-	if (/\b(s3|artifact|artifacts|artefato|artefatos|bucket)\b/.test(text)) addGatewayRequirement(items, "S3/artifacts", ["s3", "artifact", "artifacts", "bucket", "lambda-artifacts"], true);
-	if (/\b(terraform|tfvars|foundation|apply|plan)\b/.test(text)) addGatewayRequirement(items, "Terraform/foundation", ["terraform", "tfvars", "lambda-artifacts.auto.tfvars.json", "foundation", "plan", "apply"], true);
-	if (/\b(aprovacao|approval|manual|pr|pull request)\b/.test(text)) addGatewayRequirement(items, "approval/manual gate", ["approval", "manual", "pull request", "pr", "aprovação"], true);
-	if (/\b(trusted publishing|npm|oidc|provenance|npm_token|token)\b/.test(text)) {
-		addGatewayRequirement(items, "npm Trusted Publishing", ["trusted publishing", "npm", "publish", "publishing"], true);
-		addGatewayRequirement(items, "OIDC/provenance", ["oidc", "provenance", "id-token"], true);
-		addGatewayRequirement(items, "npm/GitHub configuration", ["npm", "github", "environment", "release.yml", "NPM_TOKEN"], true);
+	const seen = new Set<string>();
+	const addTerm = (term: string, critical: boolean) => {
+		const cleaned = term.trim().replace(/^[-_./`'"()\[\]{}]+|[-_./`'"()\[\]{}]+$/g, "");
+		const hasStructuralMarker = /[\d._/-]/.test(cleaned) || /[\p{Lu}]/u.test(cleaned.slice(1));
+		if (cleaned.length < (hasStructuralMarker ? 2 : 3)) return;
+		const normalized = normalizeSearchText(cleaned);
+		if (!normalized || seen.has(normalized)) return;
+		seen.add(normalized);
+		addGatewayRequirement(items, cleaned, [cleaned], critical);
+	};
+	for (const match of prompt.matchAll(/`([^`]{3,80})`/g)) addTerm(match[1], true);
+	for (const match of prompt.matchAll(/(?:^|\s)([\w.-]+\/[\w./-]+)(?=\s|$)/g)) addTerm(match[1], true);
+	for (const match of prompt.matchAll(/\b[\p{L}\p{N}][\p{L}\p{N}_.\/-]*[._\/-][\p{L}\p{N}_.\/-]*\b/gu)) addTerm(match[0], true);
+	for (const match of prompt.matchAll(/\b(?:[\p{Lu}]{2,}[\p{L}\p{N}]*|[\p{L}]+[\p{Lu}][\p{L}\p{N}]*|[\p{L}]*\d+[\p{L}\p{N}]*)\b/gu)) addTerm(match[0], true);
+	for (const match of prompt.matchAll(/(?:^|[^\p{L}\p{N}])([\p{Lu}][\p{Ll}][\p{L}\p{N}]{2,})\b/gu)) {
+		if (match.index === 0) continue;
+		addTerm(match[1], true);
 	}
-	if (asksContinuation) {
-		addGatewayRequirement(items, "prior completed work", ["p0", "completed", "feito", "done", "implementado"], true);
-		addGatewayRequirement(items, "current blockers", ["blocked", "bloqueado", "billing", "spending", "ci", "deploy"], true);
-		addGatewayRequirement(items, "next P1 steps", ["p1", "next steps", "próximos passos", "ProductStep", "StartStep", "slice"], true);
-		addGatewayRequirement(items, "traceability", ["commit", "branch", "path", "file", "deploy", "production"], false);
-	}
-	if (asksObservability) {
-		addGatewayRequirement(items, "Grafana/Tempo symptom", ["grafana", "tempo", "root trace", "root traces", "root span"], true);
-		addGatewayRequirement(items, "Quarkus OTel configuration", ["quarkus", "otel", "opentelemetry", "build time", "build-time"], true);
-		addGatewayRequirement(items, "Datadog interaction", ["datadog", "dd_", "admission.datadoghq.com", "injection"], true);
-		addGatewayRequirement(items, "management port/service", ["management", "9001", "/q/metrics", "service"], true);
-		addGatewayRequirement(items, "Loki traceId derived field", ["loki", "traceid", "traceId", "derived field", "derived fields"], false);
-	}
-	if (asksOperations) addGatewayRequirement(items, "operational safety", ["safe", "dangerous", "manual", "approval", "rollback", "cuidados"], false);
+	for (const match of prompt.matchAll(/\b[\p{L}\p{N}]{8,}\b/gu)) addTerm(match[0], false);
 	return items.slice(0, 14);
 }
 
@@ -1129,10 +1318,10 @@ export function evaluateGatewayCoverage(requirements: GatewayRequirement[], cand
 }
 
 function sourceFreshnessRequired(prompt: string): string[] {
-	const text = normalizeSearchText(prompt);
 	const reasons: string[] = [];
-	if (/\b(confirme|confirm|verifique|verify|cheque|check|leia|read|summary|logs?|run|pipeline|ci|status atual|current status|latest|agora|now|erro|falhou|failed|rodando|running|pr #?\d+|pull request)\b/.test(text)) reasons.push("Prompt asks for current/source-of-truth state.");
-	if (/\b(retome|continue|continuar|resume)\b/.test(text) && /\b(bloquead|proximos passos|next steps|estado|status)\b/.test(text)) reasons.push("Continuation prompt asks for current state and next steps.");
+	if (/https?:\/\/\S+/i.test(prompt)) reasons.push("Prompt references an external URL that may require current source-of-truth state.");
+	if (/(?:^|\s)[\w.-]+\/[\w./-]+\.[\w.-]+\b/.test(prompt)) reasons.push("Prompt references a concrete source file path.");
+	if (/(?:^|\n).{0,80}(?:\d{4}[-/]\d{2}[-/]\d{2}|\d{2}:\d{2}:\d{2}|\s+at\s+\S+\(|\s+File\s+"[^"]+")/m.test(prompt)) reasons.push("Prompt includes timestamped or stack-like evidence.");
 	return reasons;
 }
 
@@ -1143,8 +1332,9 @@ function downgradeDecisionForCoverage<T extends GatewayJudgeDecision & { backend
 	const missing = [...(decision.missing ?? [])];
 	if (coverage.missingItems.length > 0) missing.push(`Memory coverage missing: ${coverage.missingItems.join(", ")}.`);
 	for (const reason of freshnessReasons) missing.push(reason);
-	if (coverage.coverageRatio < 0.35) status = "insufficient";
-	else if (coverage.coverageRatio < 0.8 || coverage.criticalMissing.length > 0 || freshnessReasons.length > 0) {
+	if (coverage.coverageRatio < 0.35) {
+		status = coverage.coveredItems.length > 0 && status !== "conflicting" ? "partial" : "insufficient";
+	} else if (coverage.coverageRatio < 0.8 || coverage.criticalMissing.length > 0 || freshnessReasons.length > 0) {
 		if (status === "sufficient") status = "partial";
 	}
 	const confidence = status === "sufficient" ? decision.confidence : status === "partial" ? Math.min(decision.confidence ?? 0.7, 0.74) : Math.min(decision.confidence ?? 0.55, 0.58);
@@ -1156,6 +1346,139 @@ function downgradeDecisionForCoverage<T extends GatewayJudgeDecision & { backend
 		relevantCandidateIds: [...new Set([...(decision.relevantCandidateIds ?? []), ...coverage.relevantCandidateIds])],
 		reason: [decision.reason, coverage.requestedItems.length ? `coverage ${coverage.coveredItems.length}/${coverage.requestedItems.length}` : "", freshnessReasons.length ? "source freshness required" : ""].filter(Boolean).join("; "),
 	};
+}
+
+type MissingItemSeverity = "critical" | "important" | "nice_to_have";
+type GatewayAnswerability = "answer_direct" | "answer_with_gaps" | "bounded_fallback" | "source_required";
+
+type ClassifiedMissingItem = {
+	label: string;
+	severity: MissingItemSeverity;
+	suggestedFallback: "memctx_search" | "source" | "skip_and_disclose";
+};
+
+type GatewayFallbackBudget = {
+	memctxSearchCalls: number;
+	sourceToolCalls: number;
+	maxMissingItemsToChase: number;
+	latencyTargetSeconds: number;
+	stopPolicy: "answer_with_gaps" | "normal";
+	answerability: GatewayAnswerability;
+};
+
+type GatewayTaskProfile = {
+	sourceFreshnessRequired: boolean;
+	actionLikely: boolean;
+	continuationLikely: boolean;
+	procedureLikely: boolean;
+	broadQuestion: boolean;
+	confidence: number;
+	reasons: string[];
+};
+
+function candidateNoteType(candidate: GatewayCandidate): string {
+	if (candidate.path.startsWith("70-runbooks/")) return "runbook";
+	if (candidate.path.startsWith("80-sessions/")) return "session";
+	if (candidate.path.startsWith("40-actions/")) return "action";
+	if (candidate.path.startsWith("50-decisions/") || candidate.path.startsWith("30-decisions/")) return "decision";
+	if (candidate.path.startsWith("20-context/")) return "context";
+	if (candidate.path.startsWith("60-observations/")) return "observation";
+	return "unknown";
+}
+
+function inferGatewayTaskProfile(prompt: string, candidates: GatewayCandidate[], coverage: GatewayCoverage): GatewayTaskProfile {
+	const reasons: string[] = [];
+	const sourceFreshnessReasons = sourceFreshnessRequired(prompt);
+	const sourceFreshnessRequiredFlag = sourceFreshnessReasons.length > 0;
+	if (sourceFreshnessRequiredFlag) reasons.push(...sourceFreshnessReasons.slice(0, 2));
+	const noteTypes = new Set(candidates.map(candidateNoteType));
+	const actionLikely = false;
+	const continuationLikely = noteTypes.has("session") || noteTypes.has("action");
+	if (continuationLikely) reasons.push("Retrieved memory/session shape suggests continuation or previous work state.");
+	const procedureLikely = noteTypes.has("runbook");
+	if (procedureLikely) reasons.push("Retrieved memory includes runbook-shaped notes.");
+	const broadQuestion = !sourceFreshnessRequiredFlag && prompt.length < 360 && coverage.requestedItems.length > 0 && coverage.coverageRatio >= 0.45;
+	if (broadQuestion) reasons.push("Prompt is compact and memory covers a meaningful share of requested items.");
+	const confidence = Math.min(0.95, 0.45 + (sourceFreshnessRequiredFlag ? 0.2 : 0) + (procedureLikely ? 0.15 : 0) + (continuationLikely ? 0.15 : 0) + (coverage.coverageRatio * 0.2));
+	return { sourceFreshnessRequired: sourceFreshnessRequiredFlag, actionLikely, continuationLikely, procedureLikely, broadQuestion, confidence, reasons };
+}
+
+function classifyMissingItems(coverage: GatewayCoverage, taskProfile: GatewayTaskProfile): ClassifiedMissingItem[] {
+	return coverage.missingItems.map((label) => {
+		const requirement = coverage.requestedItems.find((item) => item.label === label);
+		const severity: MissingItemSeverity = requirement?.critical ? "critical" : "nice_to_have";
+		const suggestedFallback = severity === "nice_to_have"
+			? "skip_and_disclose"
+			: taskProfile.sourceFreshnessRequired ? "source" : "memctx_search";
+		return { label, severity, suggestedFallback };
+	});
+}
+
+function hasStrongMemorySupport(status: GatewayStatus, coverage: GatewayCoverage, taskProfile: GatewayTaskProfile): boolean {
+	if (status === "sufficient") return true;
+	if (coverage.requestedItems.length === 0 && coverage.coveredItems.length === 0) return false;
+	if (coverage.coverageRatio >= 0.65) return true;
+	if (coverage.coveredItems.length >= 4) return true;
+	if (taskProfile.procedureLikely && coverage.coverageRatio >= 0.45) return true;
+	if (taskProfile.continuationLikely && coverage.coverageRatio >= 0.45) return true;
+	return taskProfile.broadQuestion && coverage.coverageRatio >= 0.45;
+}
+
+function buildGatewayFallbackBudget(status: GatewayStatus, coverage: GatewayCoverage, taskProfile: GatewayTaskProfile): GatewayFallbackBudget {
+	if (status === "sufficient") return { memctxSearchCalls: 0, sourceToolCalls: 0, maxMissingItemsToChase: 0, latencyTargetSeconds: 0, stopPolicy: "normal", answerability: "answer_direct" };
+	if (status === "partial" && taskProfile.sourceFreshnessRequired) return { memctxSearchCalls: 0, sourceToolCalls: 3, maxMissingItemsToChase: 2, latencyTargetSeconds: 30, stopPolicy: "answer_with_gaps", answerability: "source_required" };
+	if (status === "partial" && hasStrongMemorySupport(status, coverage, taskProfile) && !taskProfile.sourceFreshnessRequired) return { memctxSearchCalls: 1, sourceToolCalls: 0, maxMissingItemsToChase: 2, latencyTargetSeconds: 20, stopPolicy: "answer_with_gaps", answerability: "answer_with_gaps" };
+	if (status === "partial") return { memctxSearchCalls: 1, sourceToolCalls: 1, maxMissingItemsToChase: 2, latencyTargetSeconds: 25, stopPolicy: "answer_with_gaps", answerability: "bounded_fallback" };
+	if (status === "conflicting") return { memctxSearchCalls: 0, sourceToolCalls: 2, maxMissingItemsToChase: 2, latencyTargetSeconds: 25, stopPolicy: "answer_with_gaps", answerability: "source_required" };
+	if (hasStrongMemorySupport(status, coverage, taskProfile) && !taskProfile.sourceFreshnessRequired) return { memctxSearchCalls: 1, sourceToolCalls: 0, maxMissingItemsToChase: 2, latencyTargetSeconds: 20, stopPolicy: "answer_with_gaps", answerability: "answer_with_gaps" };
+	return { memctxSearchCalls: 0, sourceToolCalls: 3, maxMissingItemsToChase: 2, latencyTargetSeconds: 30, stopPolicy: "answer_with_gaps", answerability: "source_required" };
+}
+
+function buildSuggestedMissingSearchQuery(prompt: string, missing: ClassifiedMissingItem[]): string {
+	const chase = missing.filter((item) => item.severity !== "nice_to_have" && item.suggestedFallback === "memctx_search").slice(0, 2).map((item) => item.label);
+	if (chase.length === 0) return "";
+	return truncate(`${prompt.replace(/\s+/g, " ")} ${chase.join(" ")}`, 220);
+}
+
+function structuralCandidateRank(candidate: GatewayCandidate): number {
+	if (candidate.path.startsWith("70-runbooks/")) return 0;
+	if (candidate.path.startsWith("20-context/")) return 1;
+	if (candidate.path.startsWith("60-observations/")) return 2;
+	if (candidate.path.startsWith("80-sessions/")) return 3;
+	if (candidate.path.startsWith("40-actions/")) return 4;
+	if (candidate.path.startsWith("50-decisions/") || candidate.path.startsWith("30-decisions/")) return 5;
+	return 9;
+}
+
+function extractStructuralMemoryFacts(prompt: string, candidates: GatewayCandidate[], limit = 10): string[] {
+	const terms = promptStructuralTerms(prompt);
+	if (terms.length === 0) return [];
+	const facts: string[] = [];
+	const perCandidate = new Map<string, number>();
+	const ranked = [...candidates].sort((a, b) => {
+		const pathHitsA = terms.filter((term) => normalizeSearchText(a.path).includes(term)).length;
+		const pathHitsB = terms.filter((term) => normalizeSearchText(b.path).includes(term)).length;
+		return pathHitsB - pathHitsA || structuralCandidateRank(a) - structuralCandidateRank(b) || a.path.localeCompare(b.path);
+	});
+	for (const candidate of ranked) {
+		if (facts.length >= limit) break;
+		const candidatePath = normalizeSearchText(candidate.path);
+		const pathHit = terms.some((term) => candidatePath.includes(term));
+		for (const rawLine of stripMarkdownMetadata(candidate.content).split("\n")) {
+			if (facts.length >= limit || (perCandidate.get(candidate.path) ?? 0) >= 3) break;
+			const cleaned = normalizeContextLine(rawLine.trim().replace(/^[-*#\s]+/, ""));
+			if (cleaned.length < 10 || cleaned.length > 260 || /^Query:/i.test(cleaned)) continue;
+			const normalized = normalizeSearchText(cleaned);
+			const lineHit = terms.some((term) => normalized.includes(term));
+			if (!pathHit && !lineHit) continue;
+			const fact = `${candidate.path}: ${truncate(cleaned, 220)}`;
+			if (!facts.includes(fact)) {
+				facts.push(fact);
+				perCandidate.set(candidate.path, (perCandidate.get(candidate.path) ?? 0) + 1);
+			}
+		}
+	}
+	return facts;
 }
 
 async function judgeGatewayMemory(prompt: string, candidates: GatewayCandidate[], ctx: ExtensionContext): Promise<GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] }> {
@@ -1409,6 +1732,128 @@ function summarizeGatewayFacts(decision: GatewayJudgeDecision, candidates: Gatew
 	return [...new Set([...modelFacts, ...candidateFacts])].slice(0, broadProject ? 22 : 16);
 }
 
+function gatewayDebugEnabled(): boolean {
+	return /^(1|true|yes|on|full)$/i.test(process.env.MEMCTX_GATEWAY_DEBUG ?? "");
+}
+
+function gatewayDebugDir(): string {
+	return process.env.MEMCTX_GATEWAY_DEBUG_DIR || path.join(process.env.TMPDIR || "/tmp", "pi-memctx-gateway-debug");
+}
+
+function debugSafeText(value: string, maxChars = 320): string {
+	return truncate(sanitizeEvidence(value).replace(/\s+/g, " ").trim(), maxChars);
+}
+
+function scoreDebugCandidateLine(rawLine: string, terms: string[]): { text: string; score: number; termHits: number; reasons: string[] } | null {
+	const text = normalizeContextLine(rawLine.trim().replace(/^[-*#\s]+/, ""));
+	if (text.length < 10 || text.length > 280 || /^Query:/i.test(text)) return null;
+	if (/^(type|id|status|tags|source_of_truth|freshness|last_reviewed):/i.test(text)) return null;
+	const normalized = normalizeSearchText(text);
+	const termHits = terms.filter((term) => normalized.includes(term)).length;
+	const structure = denseMemoryLineScore(rawLine);
+	const reasons: string[] = [];
+	if (termHits > 0) reasons.push(`term:${termHits}`);
+	if (structure > 0) reasons.push(`structure:${structure}`);
+	if (/^\s*(?:[-*]|\d+[.)])\s+/.test(rawLine)) reasons.push("list");
+	if (/`[^`]+`/.test(rawLine)) reasons.push("code");
+	if (/[:=]|→|->/.test(rawLine)) reasons.push("relation");
+	if (termHits === 0 && structure < 2) return null;
+	return { text, score: (termHits * 5) + structure, termHits, reasons };
+}
+
+function writeGatewayDebugSnapshot(snapshot: unknown): void {
+	if (!gatewayDebugEnabled()) return;
+	try {
+		const dir = gatewayDebugDir();
+		fs.mkdirSync(dir, { recursive: true });
+		const id = createHash("sha1").update(JSON.stringify(snapshot).slice(0, 2000) + Date.now()).digest("hex").slice(0, 12);
+		fs.writeFileSync(path.join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${id}.json`), JSON.stringify(snapshot, null, 2) + "\n", "utf-8");
+	} catch {
+		// Debug is best effort and must never affect gateway behavior.
+	}
+}
+
+function buildGatewayDebugSnapshot(args: {
+	prompt: string;
+	packPath: string;
+	retrievalMode: RetrievalStatus["mode"];
+	retrievalResultCount: number;
+	candidates: GatewayCandidate[];
+	relevantCandidates: GatewayCandidate[];
+	facts: string[];
+	checklist: string[];
+	coverage: GatewayCoverage;
+	status: GatewayStatus;
+	confidence: number;
+	decision: GatewayJudgeDecision & { backend: GatewayDecisionStatus["backend"] };
+	taskProfile: GatewayTaskProfile;
+	fallbackBudget: GatewayFallbackBudget;
+	missingItems: ClassifiedMissingItem[];
+}): unknown {
+	const terms = promptStructuralTerms(args.prompt);
+	const selectedFactText = normalizeSearchText(args.facts.join("\n"));
+	const relevantIds = new Set(args.relevantCandidates.map((candidate) => candidate.id));
+	const candidates = args.candidates.map((candidate) => {
+		const normalizedPath = normalizeSearchText(candidate.path);
+		const normalizedContent = normalizeSearchText(stripMarkdownMetadata(candidate.content));
+		const pathHits = terms.filter((term) => normalizedPath.includes(term));
+		const contentHits = terms.filter((term) => normalizedContent.includes(term));
+		const topLines: Array<{ line: number; score: number; termHits: number; reasons: string[]; selected: boolean; text: string }> = [];
+		stripMarkdownMetadata(candidate.content).split("\n").forEach((line, index) => {
+			const scored = scoreDebugCandidateLine(line, terms);
+			if (!scored) return;
+			topLines.push({
+				line: index,
+				score: scored.score,
+				termHits: scored.termHits,
+				reasons: scored.reasons,
+				selected: selectedFactText.includes(normalizeSearchText(scored.text).slice(0, 80)),
+				text: debugSafeText(scored.text, 220),
+			});
+		});
+		topLines.sort((a, b) => b.score - a.score || a.line - b.line);
+		topLines.splice(8);
+		return {
+			id: candidate.id,
+			path: candidate.path,
+			noteType: candidateNoteType(candidate),
+			source: candidate.source,
+			selectedByJudge: relevantIds.has(candidate.id),
+			chars: candidate.content.length,
+			pathHits,
+			contentHits: contentHits.slice(0, 12),
+			topLines,
+		};
+	});
+	return {
+		version: 1,
+		timestamp: nowTimestamp(),
+		activePack,
+		packPath: args.packPath,
+		prompt: debugSafeText(args.prompt, 700),
+		promptTerms: terms,
+		retrievalMode: args.retrievalMode,
+		retrievalResultCount: args.retrievalResultCount,
+		status: args.status,
+		confidence: args.confidence,
+		backend: args.decision.backend,
+		decisionReason: debugSafeText(args.decision.reason ?? "", 500),
+		decisionMissing: (args.decision.missing ?? []).slice(0, 8).map((item) => debugSafeText(item, 220)),
+		coverage: {
+			covered: args.coverage.coveredItems,
+			missing: args.coverage.missingItems,
+			criticalMissing: args.coverage.criticalMissing,
+			ratio: args.coverage.coverageRatio,
+		},
+		taskProfile: args.taskProfile,
+		fallbackBudget: args.fallbackBudget,
+		classifiedMissing: args.missingItems,
+		facts: args.facts.map((fact) => debugSafeText(fact, 260)),
+		checklist: args.checklist,
+		candidates,
+	};
+}
+
 function promptWithRecentConversation(prompt: string, ctx: ExtensionContext): string {
 	const current = prompt.trim();
 	try {
@@ -1433,12 +1878,19 @@ function promptWithRecentConversation(prompt: string, ctx: ExtensionContext): st
 async function buildMemoryGatewayContext(packPath: string, prompt: string, searchResults: string, retrievalMode: RetrievalStatus["mode"], ctx: ExtensionContext): Promise<string> {
 	const broadProject = isBroadProjectPrompt(prompt);
 	const retrievedCandidates = parseGatewayCandidates(searchResults, retrievalMode);
-	const packCandidates = gatewayPackCandidates(packPath, prompt, retrievedCandidates, broadProject ? 7 : 8);
-	const candidates = (broadProject ? [...packCandidates, ...retrievedCandidates] : [...retrievedCandidates, ...packCandidates]).slice(0, broadProject ? 10 : 14);
+	const packCandidates = gatewayPackCandidates(packPath, prompt, retrievedCandidates, broadProject ? 7 : 12);
+	const rawCandidates = (broadProject ? [...packCandidates, ...retrievedCandidates] : [...retrievedCandidates, ...packCandidates]).slice(0, broadProject ? 10 : 18);
+	const headingChunkCandidates = buildHeadingChunkCandidates(packPath, prompt, rawCandidates, broadProject ? 8 : 12);
+	const rawFallback = rawCandidates.slice(0, broadProject ? 3 : 4);
+	const candidates = [...headingChunkCandidates, ...rawFallback].slice(0, broadProject ? 11 : 16);
 	const decision = await judgeGatewayMemory(prompt, candidates, ctx);
 	const requirements = buildPromptRequirements(prompt);
 	const coverage = evaluateGatewayCoverage(requirements, candidates);
 	const status = decision.status ?? "insufficient";
+	const taskProfile = inferGatewayTaskProfile(prompt, candidates, coverage);
+	const missingItems = classifyMissingItems(coverage, taskProfile);
+	const fallbackBudget = buildGatewayFallbackBudget(status, coverage, taskProfile);
+	const suggestedMissingSearchQuery = buildSuggestedMissingSearchQuery(prompt, missingItems);
 	const confidence = typeof decision.confidence === "number" ? decision.confidence : 0;
 	const relevantIds = new Set(decision.relevantCandidateIds ?? []);
 	if (broadProject && ["sufficient", "partial"].includes(status)) {
@@ -1446,31 +1898,54 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 	}
 	const relevantCandidates = candidates.filter((candidate) => relevantIds.has(candidate.id));
 	const shouldInjectFacts = ["sufficient", "partial", "conflicting"].includes(status) && relevantCandidates.length > 0;
-	const facts = shouldInjectFacts ? enrichGatewayFacts(prompt, summarizeGatewayFacts(decision, candidates, broadProject), candidates, broadProject) : [];
-	const checklist = shouldInjectFacts ? buildRequiredChecklist(facts, prompt) : [];
-	const localSummary = shouldInjectFacts ? buildLocalMemorySummary(prompt, checklist, facts) : [];
-	const scaffold = shouldInjectFacts && localSummary.length === 0 ? buildAnswerScaffold(checklist, facts) : [];
+	const structuralFacts = shouldInjectFacts ? extractStructuralMemoryFacts(prompt, relevantCandidates.length ? relevantCandidates : candidates) : [];
+	const fallbackFacts = shouldInjectFacts && structuralFacts.length === 0 ? summarizeGatewayFacts(decision, candidates, broadProject).slice(0, 10) : [];
+	const facts = shouldInjectFacts ? [...new Set([...structuralFacts, ...fallbackFacts])].slice(0, broadProject ? 18 : 14) : [];
+	const checklist = shouldInjectFacts ? [...new Set(coverage.coveredItems)].slice(0, 14) : [];
+	const localSummary: string[] = [];
+	const scaffold: string[] = [];
 	const sources = shouldInjectFacts ? relevantCandidates.map((candidate) => candidate.path) : [];
 	lastGatewayDecision = { status, confidence, backend: decision.backend, candidateCount: candidates.length, injected: shouldInjectFacts, reason: decision.reason ?? "", timestamp: nowTimestamp() };
 
 	const instruction = status === "sufficient"
 		? "Answer from these facts now. Do not call memctx_search and do not inspect the repo: this brief is the memory search result. Checklist items are mandatory: mention them with exact names when relevant. Use other tools only if the user asks for current files/source lines or facts conflict."
 		: status === "partial"
-			? "Use memory as a starting point. First call memctx_search with the missing checklist items if the answer depends on them; inspect source files only when memory remains incomplete or current state is requested."
+			? "Memory is partial. Stay within the fallback budget below. Prefer answering with explicit gaps over continuing tool use. Do not chase nice-to-have gaps."
 			: status === "conflicting"
-				? "Conflicting memory; inspect source-of-truth before answering."
-				: "No useful memory. Do not mention this; inspect repo/docs/workflows as normal.";
+				? "Conflicting memory; inspect source-of-truth within the fallback budget, then answer with explicit conflicts/gaps instead of continuing."
+				: "No useful memory. Inspect repo/docs/workflows as normal, but for broad prompts keep tool use bounded and answer with explicit gaps if still incomplete.";
 
 	const excerpts = shouldInjectFacts && (status !== "sufficient" || facts.length < 5)
 		? relevantCandidates.slice(0, 3).map((candidate) => `### ${candidate.path}\n${truncate(stripMarkdownMetadata(candidate.content), 650)}`)
 		: [];
+
+	if (gatewayDebugEnabled()) {
+		writeGatewayDebugSnapshot(buildGatewayDebugSnapshot({
+			prompt,
+			packPath,
+			retrievalMode,
+			retrievalResultCount: parseGatewayCandidates(searchResults, retrievalMode).length,
+			candidates,
+			relevantCandidates,
+			facts,
+			checklist,
+			coverage,
+			status,
+			confidence,
+			decision,
+			taskProfile,
+			fallbackBudget,
+			missingItems,
+		}));
+	}
 
 	const showSources = status !== "sufficient" && sources.length > 0;
 	return truncate([
 		"## Memory Gateway Brief",
 		`Status: ${status}`,
 		requirements.length ? `Coverage: ${coverage.coveredItems.length}/${requirements.length} requested item${requirements.length === 1 ? "" : "s"}` : "",
-		status === "sufficient" ? "Tool policy: memory is sufficient; do not call memctx_search for this prompt." : status === "partial" ? "Tool policy: memory is partial; use memctx_search/source fallback for missing items before final assertions." : "",
+		status === "sufficient" ? "Tool policy: memory is sufficient; do not call memctx_search for this prompt." : status === "partial" ? "Tool policy: memory is partial; bounded fallback only. If the budget is exhausted, answer with explicit gaps instead of continuing." : "",
+		status !== "sufficient" ? `Task profile: sourceFreshness=${taskProfile.sourceFreshnessRequired}, actionLikely=${taskProfile.actionLikely}, continuationLikely=${taskProfile.continuationLikely}, procedureLikely=${taskProfile.procedureLikely}, broadQuestion=${taskProfile.broadQuestion}` : "",
 		localSummary.length ? "\nLocal memory summary:" : "",
 		...localSummary.map((line) => `- ${line}`),
 		scaffold.length ? "\nAnswer scaffold:" : "",
@@ -1481,8 +1956,25 @@ async function buildMemoryGatewayContext(packPath: string, prompt: string, searc
 		...facts.slice(0, localSummary.length ? 4 : checklist.length ? 8 : 12).map((fact) => `- ${fact}`),
 		excerpts.length ? "\nExcerpts:" : "",
 		...excerpts,
-		coverage.missingItems.length ? "\nMissing checklist items:" : "",
-		...coverage.missingItems.slice(0, 6).map((item) => `- ${item}`),
+		missingItems.length ? "\nMissing checklist items:" : "",
+		...missingItems.slice(0, 6).map((item) => `- ${item.label} (${item.severity}; fallback: ${item.suggestedFallback})`),
+		status !== "sufficient" ? "\nFallback budget:" : "",
+		status !== "sufficient" ? `- Chase at most ${fallbackBudget.maxMissingItemsToChase} missing item${fallbackBudget.maxMissingItemsToChase === 1 ? "" : "s"}; prefer critical items.` : "",
+		status !== "sufficient" ? `- memctx_search calls: max ${fallbackBudget.memctxSearchCalls}.` : "",
+		status !== "sufficient" ? `- source read/search tools: max ${fallbackBudget.sourceToolCalls}${fallbackBudget.sourceToolCalls === 0 ? " (source tool budget is 0; do not use read/bash/grep/find for this prompt; answer from memory with gaps)" : ""}.` : "",
+		status !== "sufficient" ? `- latency target: keep fallback under ~${fallbackBudget.latencyTargetSeconds}s.` : "",
+		status !== "sufficient" ? "- Do not chase nice-to-have gaps; disclose them." : "",
+		status !== "sufficient" ? "- After the first focused fallback, stop; do not continue searching for additional detail." : "",
+		status !== "sufficient" ? "- Budget compliance is mandatory; do not optimize for exhaustive completeness." : "",
+		status !== "sufficient" ? "- Treat the source tool budget as a hard cap for read/bash/grep/find/list-style tools combined." : "",
+		status !== "sufficient" ? "- If still incomplete after budget, answer with explicit gaps instead of continuing." : "",
+		suggestedMissingSearchQuery ? "\nSuggested focused memctx_search query:" : "",
+		suggestedMissingSearchQuery ? `- ${suggestedMissingSearchQuery}` : "",
+		status !== "sufficient" ? "\nIf incomplete, answer shape:" : "",
+		status !== "sufficient" ? "1. What memory supports" : "",
+		status !== "sufficient" ? "2. What remains unknown" : "",
+		status !== "sufficient" ? "3. Minimal next checks" : "",
+		status !== "sufficient" ? "4. Risk level" : "",
 		decision.missing?.length ? "\nJudge missing/context:" : "",
 		...(decision.missing ?? []).slice(0, 3).map((item) => `- ${item}`),
 		decision.conflicts?.length ? "\nConflicts:" : "",
@@ -1508,17 +2000,23 @@ function detectPromptPackIntentDeterministic(prompt: string, packsDir: string): 
 		const packPath = path.join(packsDir, pack);
 		const { aliases } = extractPackAliases(pack, packPath);
 		let score = 0;
+		let exactPackName = false;
 		const reasons: string[] = [];
 		for (const alias of aliases) {
 			const normalized = alias.toLowerCase();
 			if (normalized.length < 3) continue;
 			if (promptLower.includes(normalized)) {
-				score += normalized === pack.toLowerCase() ? 100 : 55;
+				if (normalized === pack.toLowerCase()) {
+					exactPackName = true;
+					score += 200;
+				} else {
+					score += 55;
+				}
 				if (reasons.length < 5) reasons.push(`prompt matched alias "${alias}"`);
 			}
 		}
-		return { pack, packPath, score, confidence: confidenceForScore(score), reasons };
-	}).sort((a, b) => b.score - a.score);
+		return { pack, packPath, score, confidence: confidenceForScore(score), reasons, exactPackName };
+	}).sort((a, b) => Number(b.exactPackName) - Number(a.exactPackName) || b.score - a.score);
 	return matches[0]?.score ? matches[0] : null;
 }
 
@@ -1557,7 +2055,7 @@ async function maybeSwitchPackByPrompt(prompt: string, packsDir: string, ctx: Ex
 	const from = activePack;
 	activePack = match.pack;
 	activePackPath = match.packPath;
-	qmdCollection = `memctx-${match.pack}`;
+	qmdCollection = qmdCollectionName(match.pack, match.packPath);
 	lastPackSelection = match;
 	lastPackSwitch = { from, to: match.pack, reason: match.reasons.join("; "), confidence: match.confidence, timestamp: nowTimestamp() };
 	if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
@@ -3688,6 +4186,7 @@ export function generatePackFromDirectory(
 	for (const dir of [
 		"00-system/pi-agent",
 		"00-system/indexes",
+		"00-system/fact-cards",
 		"00-system/local",
 		"10-user",
 		"20-context",
@@ -3937,7 +4436,7 @@ async function maybeBootstrapPack(ctx: ExtensionContext, packsDir: string): Prom
 	const { packPath, filesCreated } = generatePackFromDirectory(ctx.cwd, slug, packsDir);
 	activePack = slug;
 	activePackPath = packPath;
-	qmdCollection = `memctx-${slug}`;
+	qmdCollection = qmdCollectionName(slug, activePackPath || path.join(packsDir, slug));
 	ctx.ui.notify(`memctx: Created pack \"${slug}\" with ${filesCreated.length} files.`, "info");
 	return true;
 }
@@ -3954,7 +4453,7 @@ export function _setVaultRoot(root: string) {
 export function _setActivePack(pack: string, packPath: string) {
 	activePack = pack;
 	activePackPath = packPath;
-	qmdCollection = `memctx-${pack}`;
+	qmdCollection = qmdCollectionName(pack, packPath);
 }
 export function _setQmdAvailable(available: boolean) {
 	qmdAvailable = available;
@@ -4022,7 +4521,7 @@ export default function (pi: ExtensionAPI) {
 
 		activePack = detected;
 		activePackPath = path.join(packsDir, detected);
-		qmdCollection = `memctx-${detected}`;
+		qmdCollection = qmdCollectionName(detected, activePackPath);
 
 		// Detect qmd
 		qmdAvailable = await detectQmd();
@@ -4313,7 +4812,7 @@ export default function (pi: ExtensionAPI) {
 				vaultRoot = path.dirname(packsDir);
 				activePack = slug;
 				activePackPath = targetPackPath;
-				qmdCollection = `memctx-${slug}`;
+				qmdCollection = qmdCollectionName(slug, activePackPath || path.join(packsDir, slug));
 				rememberWorkspaceMemory(packsDir, scanDir, slug);
 				if (qmdAvailable) qmdEmbed(qmdCollection, activePackPath).catch(() => {});
 				ctx.ui.notify(`memctx: Linked workspace to existing memory "${slug}".`, "info");
@@ -4329,7 +4828,7 @@ export default function (pi: ExtensionAPI) {
 		vaultRoot = path.dirname(packsDir);
 		activePack = slug;
 		activePackPath = packPath;
-		qmdCollection = `memctx-${slug}`;
+		qmdCollection = qmdCollectionName(slug, activePackPath || path.join(packsDir, slug));
 		lastPackSwitch = { from: "", to: slug, reason: "initialized workspace memory", confidence: "high", timestamp: nowTimestamp() };
 		rememberWorkspaceMemory(packsDir, scanDir, slug);
 

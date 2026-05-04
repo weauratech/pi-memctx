@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-05-04
+
+### Added
+
+- Add opt-in Memory Gateway debug snapshots via `MEMCTX_GATEWAY_DEBUG=1`, written to `$TMPDIR/pi-memctx-gateway-debug/` with sanitized candidate, coverage, fact, and fallback-budget diagnostics.
+- Add a simple GitHub Pages landing page under `docs/index.html` with anonymized benchmark results.
+- Add a GitHub Pages deployment workflow for the landing page.
+
+### Changed
+
+- Scope qmd collection names by absolute pack path to avoid cross-vault index reuse when multiple packs share a name.
+- Improve gateway retrieval with heading-aware chunks and neighboring heading facts while preserving bounded fallback behavior.
+- Replace domain-specific prompt coverage heuristics with generic structural-term extraction suitable for open-source/global usage.
+- Update README benchmark documentation with a 25-run anonymized real-world stress benchmark.
+
+### Fixed
+
+- Include symlinked pack directories in `listPacks()` so isolated vaults and symlink-based pack layouts are detected correctly.
+- Prefer explicit pack-name matches in prompt-based pack switching over accumulated weak aliases from other packs.
+
 
 ## [0.12.0] - 2026-05-03
 
