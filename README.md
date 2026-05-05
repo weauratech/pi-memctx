@@ -10,6 +10,10 @@
 
 <p align="center">
   <a href="https://github.com/weauratech/pi-memctx/stargazers"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fapi.github.com%2Frepos%2Fweauratech%2Fpi-memctx&query=%24.stargazers_count&label=stars&color=yellow&style=flat&logo=github" alt="Stars"></a>
+  <a href="https://www.npmjs.com/package/pi-memctx"><img src="https://img.shields.io/npm/v/pi-memctx?style=flat&logo=npm&label=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/pi-memctx"><img src="https://img.shields.io/npm/dm/pi-memctx?style=flat&logo=npm&label=downloads/month" alt="npm monthly downloads"></a>
+  <a href="https://www.npmjs.com/package/pi-memctx"><img src="https://img.shields.io/npm/dt/pi-memctx?style=flat&logo=npm&label=total%20downloads" alt="npm total downloads"></a>
+  <a href="https://npmcharts.com/compare/pi-memctx?minimal=true"><img src="https://img.shields.io/badge/downloads-chart-orange?style=flat&logo=npm" alt="npm downloads chart"></a>
   <a href="https://github.com/weauratech/pi-memctx/commits/main"><img src="https://img.shields.io/github/last-commit/weauratech/pi-memctx?style=flat" alt="Last Commit"></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/weauratech/pi-memctx?style=flat" alt="License"></a>
   <a href="https://github.com/weauratech/pi-memctx/releases/latest"><img src="https://img.shields.io/badge/release-v0.13.0-blue?style=flat" alt="Latest Release"></a>
