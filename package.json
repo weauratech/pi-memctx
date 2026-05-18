@@ -58,12 +58,13 @@
   },
   "scripts": {
     "test": "bun test test/",
+    "test:coverage": "bun test --coverage test/",
     "test:e2e": "bun run test/e2e.ts",
     "doctor": "node bin/pi-memctx.mjs doctor",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "ci": "npm run lint && npm run typecheck && npm test && npm run test:e2e"
+    "ci": "npm run lint && npm run typecheck && npm run test:coverage && npm run test:e2e"
   }
 }
