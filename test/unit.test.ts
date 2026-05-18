@@ -21,18 +21,19 @@ import {
 	buildNote,
 	buildPackContext,
 	buildPromptRequirements,
-	llmArchitectureNote,
 	buildSessionHandoff,
 	detectActivePack,
 	evaluateGatewayCoverage,
 	findVaultRoot,
 	generatePackFromDirectory,
 	grepSearchPack,
-	normalizeNoteTitle,
 	listPacks,
+	llmArchitectureNote,
+	normalizeNoteTitle,
 	nowTimestamp,
 	readFileSafe,
 	readFrontmatterType,
+	resolveLlmModel,
 	resolveNoteDir,
 	resolvePacksDir,
 	scanPackFiles,
@@ -40,7 +41,6 @@ import {
 	slugify,
 	todayStr,
 	truncate,
-	resolveLlmModel,
 } from "../index.js";
 
 // ---------------------------------------------------------------------------
@@ -76,10 +76,7 @@ function createTestVault(packName = "test-pack"): {
 	const packPath = path.join(packsDir, packName);
 
 	// package.json at vault root
-	fs.writeFileSync(
-		path.join(vaultRoot, "package.json"),
-		JSON.stringify({ name: "agent-memory-vault", version: "0.1.0" }),
-	);
+	fs.writeFileSync(path.join(vaultRoot, "package.json"), JSON.stringify({ name: "agent-memory-vault", version: "0.1.0" }));
 
 	// Pack structure
 	fs.mkdirSync(path.join(packPath, "00-system", "pi-agent"), { recursive: true });
@@ -320,12 +317,14 @@ describe("Memory Gateway coverage guardrails", () => {
 
 	test("marks missing critical structural items when memory is partial", () => {
 		const requirements = buildPromptRequirements("Explain RootTrace debugging in AlphaUI/BetaTrace with GammaRuntime, OTel, DeltaAgent, and port 9001.");
-		const coverage = evaluateGatewayCoverage(requirements, [{
-			id: "c1",
-			path: "70-runbooks/system-debugging.md",
-			content: "AlphaUI BetaTrace RootTrace with GammaRuntime OTel configuration are documented here.",
-			source: "none",
-		}]);
+		const coverage = evaluateGatewayCoverage(requirements, [
+			{
+				id: "c1",
+				path: "70-runbooks/system-debugging.md",
+				content: "AlphaUI BetaTrace RootTrace with GammaRuntime OTel configuration are documented here.",
+				source: "none",
+			},
+		]);
 		expect(coverage.coveredItems).toContain("AlphaUI/BetaTrace");
 		expect(coverage.coveredItems).toContain("GammaRuntime");
 		expect(coverage.coveredItems).toContain("OTel");
@@ -382,18 +381,12 @@ describe("findVaultRoot", () => {
 	afterEach(cleanupTmpDir);
 
 	test("finds vault root with package.json", () => {
-		fs.writeFileSync(
-			path.join(tmpDir, "package.json"),
-			JSON.stringify({ name: "agent-memory-vault" }),
-		);
+		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "agent-memory-vault" }));
 		expect(findVaultRoot(tmpDir)).toBe(tmpDir);
 	});
 
 	test("finds vault root from subdirectory", () => {
-		fs.writeFileSync(
-			path.join(tmpDir, "package.json"),
-			JSON.stringify({ name: "agent-memory-vault" }),
-		);
+		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "agent-memory-vault" }));
 		const subdir = path.join(tmpDir, "extensions", "pi-memctx");
 		fs.mkdirSync(subdir, { recursive: true });
 		expect(findVaultRoot(subdir)).toBe(tmpDir);
@@ -404,10 +397,7 @@ describe("findVaultRoot", () => {
 	});
 
 	test("returns null for non-matching package.json", () => {
-		fs.writeFileSync(
-			path.join(tmpDir, "package.json"),
-			JSON.stringify({ name: "some-other-package" }),
-		);
+		fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "some-other-package" }));
 		expect(findVaultRoot(tmpDir)).toBeNull();
 	});
 
@@ -785,10 +775,7 @@ describe("buildPackContext", () => {
 
 		// Add a lot of content to blow the budget
 		for (let i = 0; i < 20; i++) {
-			fs.writeFileSync(
-				path.join(packPath, "40-actions", `action-${i}.md`),
-				`---\ntype: action\n---\n# Action ${i}\n${"x".repeat(2000)}\n`,
-			);
+			fs.writeFileSync(path.join(packPath, "40-actions", `action-${i}.md`), `---\ntype: action\n---\n# Action ${i}\n${"x".repeat(2000)}\n`);
 		}
 
 		const context = buildPackContext(packPath);
@@ -798,10 +785,7 @@ describe("buildPackContext", () => {
 	test("handles pack with only manifest", () => {
 		const packPath = path.join(tmpDir, "minimal-pack");
 		fs.mkdirSync(path.join(packPath, "00-system"), { recursive: true });
-		fs.writeFileSync(
-			path.join(packPath, "00-system", "manifest.md"),
-			"---\ntype: system\n---\n# Manifest\nMinimal pack.",
-		);
+		fs.writeFileSync(path.join(packPath, "00-system", "manifest.md"), "---\ntype: system\n---\n# Manifest\nMinimal pack.");
 
 		const context = buildPackContext(packPath);
 		expect(context).toContain("Pack System");
@@ -823,11 +807,7 @@ describe("buildPackContext", () => {
 		const { packPath } = createTestVault();
 		_setContextPipelineForTest("qmd-economy");
 
-		const context = buildPackContext(
-			packPath,
-			"The service builds Lambda ZIP files, uploads them to S3, and opens an IaC PR that Terraform applies.",
-			"这个项目的 Lambda 版本部署是怎么工作的？",
-		);
+		const context = buildPackContext(packPath, "The service builds Lambda ZIP files, uploads them to S3, and opens an IaC PR that Terraform applies.", "这个项目的 Lambda 版本部署是怎么工作的？");
 
 		expect(context).toContain("qmd-economy compact memory");
 		expect(context).toContain("Lambda ZIP");
@@ -841,7 +821,10 @@ describe("buildPackContext", () => {
 		const { packPath } = createTestVault();
 		_setContextPipelineForTest("qmd-economy");
 		fs.mkdirSync(path.join(packPath, "00-system", "fact-cards"), { recursive: true });
-		fs.writeFileSync(path.join(packPath, "00-system", "fact-cards", "deploy.md"), `---\ntype: fact-card\n---\n# Deploy Fact Card\n\n## Draft answer\n\nDeploy gateway to production with ArgoCD syncs the Helm chart.\n\n## Required facts\n\n- ArgoCD syncs the Helm chart to Kubernetes.\n`);
+		fs.writeFileSync(
+			path.join(packPath, "00-system", "fact-cards", "deploy.md"),
+			`---\ntype: fact-card\n---\n# Deploy Fact Card\n\n## Draft answer\n\nDeploy gateway to production with ArgoCD syncs the Helm chart.\n\n## Required facts\n\n- ArgoCD syncs the Helm chart to Kubernetes.\n`,
+		);
 
 		const context = buildPackContext(
 			packPath,
@@ -858,7 +841,10 @@ describe("buildPackContext", () => {
 	test("grep fallback ranks specific technical anchors above generic deploy notes", () => {
 		const { packPath } = createTestVault();
 		fs.writeFileSync(path.join(packPath, "70-runbooks", "generic-deploy.md"), "# Deploy\n\nDeploy gateway with Helm and ArgoCD.");
-		fs.writeFileSync(path.join(packPath, "20-context", "lambda-release.md"), "# Lambda release\n\nLambda ZIP artifacts go to S3. Terraform applies lambda-artifacts.auto.tfvars.json for version rollout.");
+		fs.writeFileSync(
+			path.join(packPath, "20-context", "lambda-release.md"),
+			"# Lambda release\n\nLambda ZIP artifacts go to S3. Terraform applies lambda-artifacts.auto.tfvars.json for version rollout.",
+		);
 
 		const result = grepSearchPack(packPath, "como funciona o deploy de versão dos lambdas no projeto?", 2);
 
@@ -932,7 +918,21 @@ describe("extension registration", () => {
 		for (const command of ["memctx", "memctx-init", "memctx-status", "memctx-review", "memctx-refresh", "memctx-doctor"]) {
 			expect(commands[command]).toBeDefined();
 		}
-		for (const removed of ["memctx-pack", "pack", "memctx-pack-status", "pack-status", "memctx-strict", "memctx-pack-generate", "pack-generate", "memctx-retrieval", "memctx-autosave", "memctx-save-queue", "memctx-pack-enrich", "memctx-profile", "memctx-config"]) {
+		for (const removed of [
+			"memctx-pack",
+			"pack",
+			"memctx-pack-status",
+			"pack-status",
+			"memctx-strict",
+			"memctx-pack-generate",
+			"pack-generate",
+			"memctx-retrieval",
+			"memctx-autosave",
+			"memctx-save-queue",
+			"memctx-pack-enrich",
+			"memctx-profile",
+			"memctx-config",
+		]) {
 			expect(commands[removed]).toBeUndefined();
 		}
 	});
@@ -949,10 +949,7 @@ describe("extension registration", () => {
 
 	test("/memctx-review lists queued candidates for the active pack only", async () => {
 		const { packPath } = createTestVault();
-		writeSaveQueueForTest([
-			queuedCandidate(),
-			queuedCandidate({ id: "mem-other", title: "Other pack", pack: "other-pack" }),
-		]);
+		writeSaveQueueForTest([queuedCandidate(), queuedCandidate({ id: "mem-other", title: "Other pack", pack: "other-pack" })]);
 		const { pi, commands } = createMockPi();
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
@@ -998,10 +995,7 @@ describe("extension registration", () => {
 
 	test("/memctx-review clear removes only active-pack candidates after confirmation", async () => {
 		const { packPath } = createTestVault();
-		writeSaveQueueForTest([
-			queuedCandidate(),
-			queuedCandidate({ id: "mem-other", pack: "other-pack" }),
-		]);
+		writeSaveQueueForTest([queuedCandidate(), queuedCandidate({ id: "mem-other", pack: "other-pack" })]);
 		const { pi, commands } = createMockPi();
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
@@ -1066,13 +1060,7 @@ describe("memctx_search tool (grep fallback)", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_search"].execute(
-			"call-1",
-			{ query: "PostgreSQL" },
-			null,
-			() => {},
-			{},
-		);
+		const result = await tools["memctx_search"].execute("call-1", { query: "PostgreSQL" }, null, () => {}, {});
 
 		expect(result.content[0].text).toContain("PostgreSQL");
 		expect(result.details.mode).toBe("grep-fallback");
@@ -1084,13 +1072,7 @@ describe("memctx_search tool (grep fallback)", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_search"].execute(
-			"call-1",
-			{ query: "xyznonexistent" },
-			null,
-			() => {},
-			{},
-		);
+		const result = await tools["memctx_search"].execute("call-1", { query: "xyznonexistent" }, null, () => {}, {});
 
 		expect(result.content[0].text).toContain("No results");
 	});
@@ -1101,13 +1083,7 @@ describe("memctx_search tool (grep fallback)", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_search"].execute(
-			"call-1",
-			{ query: "TypeScript Bun runtime" },
-			null,
-			() => {},
-			{},
-		);
+		const result = await tools["memctx_search"].execute("call-1", { query: "TypeScript Bun runtime" }, null, () => {}, {});
 
 		// Should find both project-context (TypeScript, Bun) and decision (Bun, runtime)
 		expect(result.content[0].text).toContain("terms matched");
@@ -1118,23 +1094,14 @@ describe("memctx_search tool (grep fallback)", () => {
 		const { packPath } = createTestVault();
 		// Add many matching files
 		for (let i = 0; i < 10; i++) {
-			fs.writeFileSync(
-				path.join(packPath, "60-observations", `obs-${i}.md`),
-				`---\ntype: observation\n---\n# Observation ${i}\nFound deploy issue.`,
-			);
+			fs.writeFileSync(path.join(packPath, "60-observations", `obs-${i}.md`), `---\ntype: observation\n---\n# Observation ${i}\nFound deploy issue.`);
 		}
 
 		const { pi, tools } = createMockPi();
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_search"].execute(
-			"call-1",
-			{ query: "deploy", limit: 3 },
-			null,
-			() => {},
-			{},
-		);
+		const result = await tools["memctx_search"].execute("call-1", { query: "deploy", limit: 3 }, null, () => {}, {});
 
 		// Count matches in output
 		const matchCount = (result.content[0].text.match(/### /g) || []).length;
@@ -1158,10 +1125,7 @@ describe("before_agent_start context injection", () => {
 		registerExtension(pi as any);
 		_resetState();
 
-		const result = await hooks["before_agent_start"](
-			{ prompt: "hello", systemPrompt: "You are helpful." },
-			createMockCtx(),
-		);
+		const result = await hooks["before_agent_start"]({ prompt: "hello", systemPrompt: "You are helpful." }, createMockCtx());
 
 		expect(result).toBeUndefined();
 	});
@@ -1172,10 +1136,7 @@ describe("before_agent_start context injection", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = (await hooks["before_agent_start"](
-			{ prompt: "what stack do we use?", systemPrompt: "You are helpful." },
-			createMockCtx(),
-		)) as any;
+		const result = (await hooks["before_agent_start"]({ prompt: "what stack do we use?", systemPrompt: "You are helpful." }, createMockCtx())) as any;
 
 		expect(result).toBeDefined();
 		expect(result.systemPrompt).toContain("You are helpful.");
@@ -1189,10 +1150,7 @@ describe("before_agent_start context injection", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = (await hooks["before_agent_start"](
-			{ prompt: "test", systemPrompt: "" },
-			createMockCtx(),
-		)) as any;
+		const result = (await hooks["before_agent_start"]({ prompt: "test", systemPrompt: "" }, createMockCtx())) as any;
 
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 	});
@@ -1204,10 +1162,7 @@ describe("before_agent_start context injection", () => {
 		_setActivePack("test-pack", packPath);
 		_setQmdAvailable(false);
 
-		const result = (await hooks["before_agent_start"](
-			{ prompt: "PostgreSQL database", systemPrompt: "" },
-			createMockCtx(),
-		)) as any;
+		const result = (await hooks["before_agent_start"]({ prompt: "PostgreSQL database", systemPrompt: "" }, createMockCtx())) as any;
 
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 		expect(result.systemPrompt).toContain("PostgreSQL");
@@ -1220,10 +1175,7 @@ describe("before_agent_start context injection", () => {
 		_setActivePack("test-pack", packPath);
 		_setStrictMode(true);
 
-		const result = (await hooks["before_agent_start"](
-			{ prompt: "what stack do we use?", systemPrompt: "" },
-			createMockCtx(),
-		)) as any;
+		const result = (await hooks["before_agent_start"]({ prompt: "what stack do we use?", systemPrompt: "" }, createMockCtx())) as any;
 
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
 	});
@@ -1235,10 +1187,7 @@ describe("before_agent_start context injection", () => {
 		_setActivePack("test-pack", packPath);
 		_setContextPipelineForTest("qmd-economy");
 
-		const result = (await hooks["before_agent_start"](
-			{ prompt: "这个项目是怎么部署的？", systemPrompt: "" },
-			createMockCtx(),
-		)) as any;
+		const result = (await hooks["before_agent_start"]({ prompt: "这个项目是怎么部署的？", systemPrompt: "" }, createMockCtx())) as any;
 
 		expect(result.systemPrompt).toContain("pi-memctx Memory Gateway");
 		expect(result.systemPrompt).toContain("Memory Gateway Brief");
@@ -1358,17 +1307,23 @@ describe("slugify", () => {
 
 describe("llmArchitectureNote", () => {
 	test("tolerates missing optional arrays from LLM output", () => {
-		const note = llmArchitectureNote("demo", {
-			name: "Demo Repo",
-			slug: "demo-repo",
-			description: "Demo description",
-			observations: ["Observed fallback architecture."],
-		} as any, {
-			summary: "LLM summary",
-			domains: [{ name: "api", responsibility: "HTTP API" }],
-			integrations: undefined,
-			envVars: "DATABASE_URL",
-		} as any, ["src/index.ts"], "2026-05-01");
+		const note = llmArchitectureNote(
+			"demo",
+			{
+				name: "Demo Repo",
+				slug: "demo-repo",
+				description: "Demo description",
+				observations: ["Observed fallback architecture."],
+			} as any,
+			{
+				summary: "LLM summary",
+				domains: [{ name: "api", responsibility: "HTTP API" }],
+				integrations: undefined,
+				envVars: "DATABASE_URL",
+			} as any,
+			["src/index.ts"],
+			"2026-05-01",
+		);
 
 		expect(note).toContain("LLM summary");
 		expect(note).toContain("| api | HTTP API | - |");
@@ -1461,7 +1416,9 @@ describe("memctx_save tool", () => {
 				content: "Discovered Redis runs on port 6379 in dev environment.",
 				tags: ["redis", "dev"],
 			},
-			null, () => {}, {},
+			null,
+			() => {},
+			{},
 		);
 
 		expect(result.content[0].text).toContain("Saved observation");
@@ -1485,11 +1442,7 @@ describe("memctx_save tool", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		await tools["memctx_save"].execute(
-			"c1",
-			{ type: "action", title: "Setup CI", content: "Configured GitHub Actions." },
-			null, () => {}, {},
-		);
+		await tools["memctx_save"].execute("c1", { type: "action", title: "Setup CI", content: "Configured GitHub Actions." }, null, () => {}, {});
 
 		const files = fs.readdirSync(path.join(packPath, "40-actions"));
 		const actionFile = files.find((f) => f.includes("setup-ci"));
@@ -1506,7 +1459,9 @@ describe("memctx_save tool", () => {
 		const result = await tools["memctx_save"].execute(
 			"c1",
 			{ type: "runbook", title: "Runbook: sync central instructions", content: "Step 1. Generate instructions. Step 2. Open PR." },
-			null, () => {}, {},
+			null,
+			() => {},
+			{},
 		);
 
 		expect(result.details.path).toBe("70-runbooks/sync-central-instructions.md");
@@ -1523,18 +1478,10 @@ describe("memctx_save tool", () => {
 		_setActivePack("test-pack", packPath);
 
 		// Create first
-		await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "Redis config", content: "Port is 6379." },
-			null, () => {}, {},
-		);
+		await tools["memctx_save"].execute("c1", { type: "observation", title: "Redis config", content: "Port is 6379." }, null, () => {}, {});
 
 		// Update same slug
-		const result = await tools["memctx_save"].execute(
-			"c2",
-			{ type: "observation", title: "Redis config", content: "Also uses password auth." },
-			null, () => {}, {},
-		);
+		const result = await tools["memctx_save"].execute("c2", { type: "observation", title: "Redis config", content: "Also uses password auth." }, null, () => {}, {});
 
 		expect(result.details.action).toBe("updated");
 
@@ -1554,11 +1501,7 @@ describe("memctx_save tool", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "API Key", content: "password: super_secret_123" },
-			null, () => {}, {},
-		);
+		const result = await tools["memctx_save"].execute("c1", { type: "observation", title: "API Key", content: "password: super_secret_123" }, null, () => {}, {});
 
 		expect(result.content[0].text).toContain("Blocked");
 		expect(result.isError).toBe(true);
@@ -1570,11 +1513,7 @@ describe("memctx_save tool", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "Database config", content: "BANCO_SENHA: super_secret_123" },
-			null, () => {}, {},
-		);
+		const result = await tools["memctx_save"].execute("c1", { type: "observation", title: "Database config", content: "BANCO_SENHA: super_secret_123" }, null, () => {}, {});
 
 		expect(result.content[0].text).toContain("Blocked");
 		expect(result.isError).toBe(true);
@@ -1597,7 +1536,9 @@ describe("memctx_save tool", () => {
 				content: "Discovered from `argo-cd/environments/prod/payments-api/values.yaml`.",
 				tags: ["repo/argo-cd", "payments-api"],
 			},
-			null, () => {}, {},
+			null,
+			() => {},
+			{},
 		);
 
 		expect(result.details.action).toBe("updated");
@@ -1612,11 +1553,7 @@ describe("memctx_save tool", () => {
 		registerExtension(pi as any);
 		_setActivePack("test-pack", packPath);
 
-		const result = await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "AWS", content: "Key is AKIAIOSFODNN7EXAMPLE" },
-			null, () => {}, {},
-		);
+		const result = await tools["memctx_save"].execute("c1", { type: "observation", title: "AWS", content: "Key is AKIAIOSFODNN7EXAMPLE" }, null, () => {}, {});
 
 		expect(result.isError).toBe(true);
 	});
@@ -1626,11 +1563,7 @@ describe("memctx_save tool", () => {
 		registerExtension(pi as any);
 		_resetState();
 
-		const result = await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "Test", content: "Test" },
-			null, () => {}, {},
-		);
+		const result = await tools["memctx_save"].execute("c1", { type: "observation", title: "Test", content: "Test" }, null, () => {}, {});
 
 		expect(result.content[0].text).toContain("No active memory pack");
 	});
@@ -1652,12 +1585,19 @@ describe("pack-generate deterministic discovery", () => {
 
 		const nodeRepo = path.join(scanDir, "node-app");
 		fs.mkdirSync(path.join(nodeRepo, ".github", "workflows"), { recursive: true });
-		fs.writeFileSync(path.join(nodeRepo, "package.json"), JSON.stringify({
-			name: "node-app",
-			description: "Node app description",
-			scripts: { dev: "next dev", build: "next build", test: "vitest", deploy: "danger" },
-			dependencies: { next: "latest", react: "latest" },
-		}, null, 2));
+		fs.writeFileSync(
+			path.join(nodeRepo, "package.json"),
+			JSON.stringify(
+				{
+					name: "node-app",
+					description: "Node app description",
+					scripts: { dev: "next dev", build: "next build", test: "vitest", deploy: "danger" },
+					dependencies: { next: "latest", react: "latest" },
+				},
+				null,
+				2,
+			),
+		);
 		fs.writeFileSync(path.join(nodeRepo, "README.md"), "# Node App\n\nA generated Node application.");
 		fs.writeFileSync(path.join(nodeRepo, "AGENTS.md"), "# Agents\n\nRun tests before changes.");
 		fs.writeFileSync(path.join(nodeRepo, ".github", "workflows", "ci.yml"), "name: CI\non: [push]\njobs: {}\n");
@@ -1713,20 +1653,11 @@ describe("integration: full flow", () => {
 		_setActivePack("test-pack", packPath);
 
 		// 1. Search
-		const searchResult = await tools["memctx_search"].execute(
-			"c1",
-			{ query: "database PostgreSQL" },
-			null,
-			() => {},
-			{},
-		);
+		const searchResult = await tools["memctx_search"].execute("c1", { query: "database PostgreSQL" }, null, () => {}, {});
 		expect(searchResult.content[0].text).toContain("PostgreSQL");
 
 		// 2. Inject context
-		const injectResult = (await hooks["before_agent_start"](
-			{ prompt: "what database do we use?", systemPrompt: "Base prompt." },
-			createMockCtx(),
-		)) as any;
+		const injectResult = (await hooks["before_agent_start"]({ prompt: "what database do we use?", systemPrompt: "Base prompt." }, createMockCtx())) as any;
 		expect(injectResult.systemPrompt).toContain("PostgreSQL");
 		expect(injectResult.systemPrompt).toContain("Base prompt.");
 
@@ -1754,13 +1685,7 @@ describe("integration: full flow", () => {
 		expect(handoff).toBeDefined();
 
 		// 4. Search should now find the handoff
-		const searchAfter = await tools["memctx_search"].execute(
-			"c2",
-			{ query: "session handoff" },
-			null,
-			() => {},
-			{},
-		);
+		const searchAfter = await tools["memctx_search"].execute("c2", { query: "session handoff" }, null, () => {}, {});
 		// The handoff file should match "session" and "handoff" terms
 		expect(searchAfter.content[0].text).toContain("session-handoff");
 		expect(searchAfter.details.matchCount).toBeGreaterThan(0);
@@ -2009,7 +1934,9 @@ describe("memctx_save model attribution", () => {
 				title: "Redis port",
 				content: "Redis runs on port 6379.",
 			},
-			null, () => {}, { model: mockModel, modelRegistry: { find: () => null, getAll: () => [mockModel] } },
+			null,
+			() => {},
+			{ model: mockModel, modelRegistry: { find: () => null, getAll: () => [mockModel] } },
 		);
 
 		expect(result.details.action).toBe("created");
@@ -2031,11 +1958,10 @@ describe("memctx_save model attribution", () => {
 
 		const hostModel = { id: "host-opus", name: "Host Opus", provider: "anthropic" } as any;
 		const internalModel = { id: "internal-haiku", name: "Internal Haiku", provider: "anthropic" } as any;
-		const result = await tools["memctx_save"].execute(
-			"c1",
-			{ type: "observation", title: "Host attribution", content: "Manual saved memory." },
-			null, () => {}, { model: hostModel, modelRegistry: { find: () => null, getAll: () => [internalModel] } },
-		);
+		const result = await tools["memctx_save"].execute("c1", { type: "observation", title: "Host attribution", content: "Manual saved memory." }, null, () => {}, {
+			model: hostModel,
+			modelRegistry: { find: () => null, getAll: () => [internalModel] },
+		});
 
 		expect(result.details.action).toBe("created");
 		const content = fs.readFileSync(path.join(packPath, "60-observations", "host-attribution.md"), "utf-8");

@@ -1,15 +1,18 @@
 import type { GatewayCandidate, GatewayJudgeDecision, RankedGatewayCandidate } from "./types.js";
 
 function normalize(text: string): string {
-	return text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+	return text
+		.normalize("NFKD")
+		.replace(/[\u0300-\u036f]/g, "")
+		.toLowerCase();
 }
 
 function terms(text: string): string[] {
-	const raw = normalize(text).match(/[\p{L}\p{N}_.\/-]+/gu) ?? [];
+	const raw = normalize(text).match(/[\p{L}\p{N}_./-]+/gu) ?? [];
 	const out = new Set<string>();
 	for (const token of raw) {
 		const cleaned = token.replace(/^[-_/.,]+|[-_/.,]+$/g, "");
-		if (cleaned.length < 3 && !/[_.\/-\d]/.test(cleaned)) continue;
+		if (cleaned.length < 3 && !/[_./-\d]/.test(cleaned)) continue;
 		out.add(cleaned);
 		if (cleaned.length > 4 && cleaned.endsWith("s")) out.add(cleaned.slice(0, -1));
 	}
@@ -33,7 +36,7 @@ export function contextualAnchors(prompt: string, candidates: GatewayCandidate[]
 	const docs = candidates.map(candidateText);
 	const anchors = promptTerms
 		.map((term) => ({ term, df: docs.filter((doc) => doc.includes(term)).length }))
-		.filter(({ term, df }) => df > 0 && (df <= Math.max(3, Math.ceil(docs.length * 0.55)) || /[_.\/-\d]/.test(term)))
+		.filter(({ term, df }) => df > 0 && (df <= Math.max(3, Math.ceil(docs.length * 0.55)) || /[_./-\d]/.test(term)))
 		.sort((a, b) => a.df - b.df || b.term.length - a.term.length)
 		.map(({ term }) => term);
 	return [...new Set(anchors)].slice(0, 10);
@@ -41,13 +44,15 @@ export function contextualAnchors(prompt: string, candidates: GatewayCandidate[]
 
 export function rankCandidates(prompt: string, candidates: GatewayCandidate[]): { anchors: string[]; ranked: RankedGatewayCandidate[] } {
 	const anchors = contextualAnchors(prompt, candidates);
-	const ranked = candidates.map((candidate) => {
-		const text = candidateText(candidate);
-		const hits = anchors.filter((anchor) => text.includes(anchor));
-		const coverage = hits.length / Math.max(1, anchors.length);
-		const score = hits.length * contentTypeBoost(candidate.path) + coverage;
-		return { candidate, hits, coverage, score };
-	}).filter((item) => item.hits.length > 0)
+	const ranked = candidates
+		.map((candidate) => {
+			const text = candidateText(candidate);
+			const hits = anchors.filter((anchor) => text.includes(anchor));
+			const coverage = hits.length / Math.max(1, anchors.length);
+			const score = hits.length * contentTypeBoost(candidate.path) + coverage;
+			return { candidate, hits, coverage, score };
+		})
+		.filter((item) => item.hits.length > 0)
 		.sort((a, b) => b.score - a.score || b.coverage - a.coverage || b.hits.length - a.hits.length);
 	return { anchors, ranked };
 }
@@ -57,7 +62,8 @@ export function selectCoverageCandidates(anchors: string[], ranked: RankedGatewa
 	const covered = new Set<string>();
 	for (const item of ranked) {
 		const addsCoverage = item.hits.some((hit) => !covered.has(hit));
-		const highValue = item.candidate.path.includes("20-context/") || item.candidate.path.includes("70-runbooks/") || item.candidate.path.includes("50-decisions/") || item.candidate.path.includes("30-decisions/");
+		const highValue =
+			item.candidate.path.includes("20-context/") || item.candidate.path.includes("70-runbooks/") || item.candidate.path.includes("50-decisions/") || item.candidate.path.includes("30-decisions/");
 		if (!addsCoverage && !highValue) continue;
 		selected.push(item);
 		for (const hit of item.hits) covered.add(hit);

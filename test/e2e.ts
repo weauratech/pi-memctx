@@ -7,18 +7,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
-import {
-	_resetState,
-	_setActivePack,
-	_setQmdAvailable,
-	_setVaultRoot,
-	buildPackContext,
-	detectActivePack,
-	findVaultRoot,
-	scanPackFiles,
-} from "../index.js";
-import registerExtension from "../index.js";
+import registerExtension, { _resetState, _setActivePack, _setQmdAvailable, _setVaultRoot, buildPackContext, detectActivePack, findVaultRoot, scanPackFiles } from "../index.js";
 
 const TMP_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "pi-memctx-e2e-"));
 const PACKS_DIR = path.join(TMP_ROOT, "packs");
@@ -47,9 +36,15 @@ function createMockPi() {
 	const commands: Record<string, any> = {};
 	return {
 		pi: {
-			registerTool(def: any) { tools[def.name] = def; },
-			on(event: string, handler: (...args: any[]) => unknown) { hooks[event] = handler; },
-			registerCommand(name: string, def: any) { commands[name] = def; },
+			registerTool(def: any) {
+				tools[def.name] = def;
+			},
+			on(event: string, handler: (...args: any[]) => unknown) {
+				hooks[event] = handler;
+			},
+			registerCommand(name: string, def: any) {
+				commands[name] = def;
+			},
 		},
 		tools,
 		hooks,
@@ -135,10 +130,10 @@ async function main() {
 	_setQmdAvailable(false);
 
 	const basePrompt = "You are a helpful coding assistant.";
-	const injectionResult = await hooks2.before_agent_start(
+	const injectionResult = (await hooks2.before_agent_start(
 		{ prompt: "how do we deploy to production?", systemPrompt: basePrompt },
 		{ sessionManager: { getSessionId: () => "e2e-test" }, hasUI: false, ui: {} },
-	) as any;
+	)) as any;
 
 	assert(!!injectionResult, "before_agent_start returns injection result");
 	assert(injectionResult.systemPrompt.startsWith(basePrompt), "Preserves original system prompt");
@@ -148,20 +143,14 @@ async function main() {
 	assert(injectionResult.systemPrompt.includes("Memory Gateway Brief"), "Includes memory gateway brief");
 
 	console.log("\n── 5. memctx_search Tool ──");
-	const searchDb = await tools2.memctx_search.execute(
-		"e2e-1", { query: "PostgreSQL database" }, null, () => {}, {},
-	);
+	const searchDb = await tools2.memctx_search.execute("e2e-1", { query: "PostgreSQL database" }, null, () => {}, {});
 	assert(searchDb.content[0].text.includes("PostgreSQL"), "Search finds database context");
 	assert(searchDb.details.mode === "grep-fallback", "Uses grep fallback when qmd is unavailable");
 
-	const searchDeploy = await tools2.memctx_search.execute(
-		"e2e-2", { query: "deploy production" }, null, () => {}, {},
-	);
+	const searchDeploy = await tools2.memctx_search.execute("e2e-2", { query: "deploy production" }, null, () => {}, {});
 	assert(searchDeploy.content[0].text.includes("Deploy") || searchDeploy.content[0].text.includes("deploy"), "Search finds deploy context");
 
-	const searchNone = await tools2.memctx_search.execute(
-		"e2e-3", { query: "xyznonexistentterm" }, null, () => {}, {},
-	);
+	const searchNone = await tools2.memctx_search.execute("e2e-3", { query: "xyznonexistentterm" }, null, () => {}, {});
 	assert(searchNone.content[0].text.includes("No results"), "Search for nonexistent term returns no results");
 
 	console.log("\n── 6. memctx_save Tool ──");
@@ -180,29 +169,26 @@ async function main() {
 	assert(saveResult.content[0].text.includes("Saved decision"), "memctx_save creates decision note");
 	assert(fs.existsSync(path.join(PACK_PATH, "50-decisions", "use-deterministic-e2e-packs.md")), "Saved decision file exists");
 
-	const blockedSave = await tools2.memctx_save.execute(
-		"e2e-5",
-		{ type: "observation", title: "Bad secret", content: "api_key = abc123", tags: [] },
-		null,
-		() => {},
-		{},
-	);
+	const blockedSave = await tools2.memctx_save.execute("e2e-5", { type: "observation", title: "Bad secret", content: "api_key = abc123", tags: [] }, null, () => {}, {});
 	assert(blockedSave.isError === true, "memctx_save blocks secret-looking content");
 
 	console.log("\n── 7. Session Handoff ──");
 	const actionsDir = path.join(PACK_PATH, "40-actions");
 	const filesBefore = fs.readdirSync(actionsDir);
-	await hooks2.session_before_compact({}, {
-		sessionManager: {
-			getSessionId: () => "e2e-handoff-session-12345678",
-			getBranch: () => [
-				{ type: "message", message: { role: "user", content: "How do I deploy to staging?" } },
-				{ type: "message", message: { role: "assistant", content: "Run deploy staging and use rollback if needed." } },
-			],
+	await hooks2.session_before_compact(
+		{},
+		{
+			sessionManager: {
+				getSessionId: () => "e2e-handoff-session-12345678",
+				getBranch: () => [
+					{ type: "message", message: { role: "user", content: "How do I deploy to staging?" } },
+					{ type: "message", message: { role: "assistant", content: "Run deploy staging and use rollback if needed." } },
+				],
+			},
+			hasUI: false,
+			ui: { notify: () => {}, setStatus: () => {} },
 		},
-		hasUI: false,
-		ui: { notify: () => {}, setStatus: () => {} },
-	});
+	);
 	const filesAfter = fs.readdirSync(actionsDir);
 	const newFiles = filesAfter.filter((f) => !filesBefore.includes(f));
 	assert(newFiles.length === 1, `Created 1 handoff file (got ${newFiles.length})`);
