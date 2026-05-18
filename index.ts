@@ -26,8 +26,8 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { cheapSemanticJudge, contextualAnchors, rankCandidates, selectCoverageCandidates } from "./src/gateway/cheap-semantic.js";
-import type { GatewayCandidate, GatewayJudgeDecision } from "./src/gateway/types.js";
+import { cheapSemanticJudge, contextualAnchors, rankCandidates, selectCoverageCandidates } from "./src/gateway/cheap-semantic.ts";
+import type { GatewayCandidate, GatewayJudgeDecision } from "./src/gateway/types.ts";
 
 // ---------------------------------------------------------------------------
 // Configuration

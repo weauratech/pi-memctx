@@ -7,7 +7,8 @@
     "types": ["node", "bun"],
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true
   },
   "include": ["index.ts", "test/**/*.ts"]
 }
