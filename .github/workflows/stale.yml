@@ -13,7 +13,7 @@ jobs:
   stale:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e # v9
+      - uses: actions/stale@1e223db275d687790206a7acac4d1a11bd6fe629 # v9
         with:
           stale-issue-message: "This issue has been inactive for 60 days. It will be closed in 14 days unless there is new activity."
           stale-pr-message: "This PR has been inactive for 30 days. It will be closed in 14 days unless there is new activity."
