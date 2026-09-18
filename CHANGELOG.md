@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Fix pi exiting with an `uncaughtException` when a widget auto-clear timer (`memctx-tool-failure`, `memctx-learned`, `memctx-learn`) fired after the session was replaced (new session, fork, switch session, or reload): pending widget clears are now tracked and cancelled in `session_shutdown`, and the timer callbacks are stale-ctx-safe.
+
 
 ## [0.13.1] - 2026-05-09
 

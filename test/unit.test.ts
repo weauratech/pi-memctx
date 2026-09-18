@@ -22,6 +22,7 @@ import {
 	buildPackContext,
 	buildPromptRequirements,
 	buildSessionHandoff,
+	cancelPendingWidgetClears,
 	detectActivePack,
 	evaluateGatewayCoverage,
 	findVaultRoot,
@@ -37,6 +38,7 @@ import {
 	resolveNoteDir,
 	resolvePacksDir,
 	scanPackFiles,
+	scheduleWidgetClear,
 	scorePackForCwd,
 	slugify,
 	todayStr,
@@ -1967,5 +1969,80 @@ describe("memctx_save model attribution", () => {
 		const content = fs.readFileSync(path.join(packPath, "60-observations", "host-attribution.md"), "utf-8");
 		expect(content).toContain("model: host-opus");
 		expect(content).not.toContain("model: internal-haiku");
+	});
+});
+
+// ==========================================================================
+// 21. Widget auto-clear timers (stale-ctx safety)
+// ==========================================================================
+
+describe("widget auto-clear timers", () => {
+	const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+	/** Minimal ctx that records setWidget calls (scheduleWidgetClear only reads hasUI + ui.setWidget). */
+	function widgetCtx() {
+		const calls: Array<{ id: string; lines: string[] }> = [];
+		const ctx = {
+			hasUI: true,
+			ui: {
+				setWidget: (id: string, lines: string[]) => {
+					calls.push({ id, lines });
+				},
+			},
+		};
+		return { ctx, calls };
+	}
+
+	afterEach(() => {
+		cancelPendingWidgetClears();
+	});
+
+	test("clears the widget via setWidget after the delay", async () => {
+		const { ctx, calls } = widgetCtx();
+		scheduleWidgetClear(ctx as any, "memctx-learned", 10);
+		expect(calls).toHaveLength(0);
+		await sleep(40);
+		expect(calls).toEqual([{ id: "memctx-learned", lines: [] }]);
+	});
+
+	test("session_shutdown cancels pending widget clears", async () => {
+		const { pi, hooks } = createMockPi();
+		registerExtension(pi as any);
+		const { ctx, calls } = widgetCtx();
+		scheduleWidgetClear(ctx as any, "memctx-learn", 10);
+		await hooks["session_shutdown"]({}, ctx as any);
+		await sleep(40);
+		expect(calls).toHaveLength(0);
+	});
+
+	test("firing on a stale ctx does not throw (regression: uncaughtException exit)", async () => {
+		// Simulates pi's assertActive(): every ctx access after session
+		// replacement throws. Pre-fix, the bare timer callback read
+		// `ctx.hasUI` and the throw escaped as an uncaughtException that
+		// killed the pi process.
+		const staleError = new Error("This extension ctx is stale after session replacement or reload.");
+		let stale = false;
+		const ctx = {
+			get hasUI() {
+				if (stale) throw staleError;
+				return true;
+			},
+			ui: {
+				setWidget: () => {
+					throw staleError;
+				},
+			},
+		};
+		scheduleWidgetClear(ctx as any, "memctx-learn", 10);
+		stale = true; // session replaced after scheduling; timer NOT cancelled
+		await sleep(40); // timer fires inside a bare callback: must not throw
+	});
+
+	test("headless ctx (hasUI false) never touches setWidget", async () => {
+		const { ctx, calls } = widgetCtx();
+		(ctx as any).hasUI = false;
+		scheduleWidgetClear(ctx as any, "memctx-learn", 10);
+		await sleep(40);
+		expect(calls).toHaveLength(0);
 	});
 });

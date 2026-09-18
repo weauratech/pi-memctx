@@ -4814,6 +4814,40 @@ export function _resetState() {
 	lastPackSwitch = null;
 	llmStats = { mode: llmMode, callsThisSession: 0, estimatedInputChars: 0, estimatedOutputChars: 0 };
 	_packsDir = "";
+	cancelPendingWidgetClears();
+}
+
+// ---------------------------------------------------------------------------
+// Widget auto-clear timer tracking (stale-ctx safety)
+// ---------------------------------------------------------------------------
+
+const pendingWidgetClears = new Set<ReturnType<typeof setTimeout>>();
+
+// Widget auto-clear timers must never outlive the session that scheduled them.
+// pi invalidates the extension ctx on session replacement (newSession, fork,
+// switchSession, reload) and process exit; merely reading `ctx.hasUI` on a
+// stale ctx throws from assertActive(), and inside a bare setTimeout callback
+// that throw becomes an uncaughtException that kills the whole pi process.
+// Track every pending widget clear here and cancel them all from
+// session_shutdown. The try/catch inside the callback is a second line of
+// defense in case a clear ever races the shutdown event.
+export function scheduleWidgetClear(ctx: ExtensionContext, widgetId: string, delayMs: number): void {
+	const uiActive = ctx.hasUI; // capture while the ctx is guaranteed live
+	const timer = setTimeout(() => {
+		pendingWidgetClears.delete(timer);
+		if (!uiActive) return;
+		try {
+			ctx.ui.setWidget(widgetId, []);
+		} catch {
+			// ctx stale after session replacement
+		}
+	}, delayMs);
+	pendingWidgetClears.add(timer);
+}
+
+export function cancelPendingWidgetClears(): void {
+	for (const timer of pendingWidgetClears) clearTimeout(timer);
+	pendingWidgetClears.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -5045,7 +5079,10 @@ export default function (pi: ExtensionAPI) {
 
 	// --- session_shutdown: cleanup ---
 	pi.on("session_shutdown", async (_event, _ctx) => {
-		// Nothing to flush at the moment
+		// Cancel pending widget auto-clear timers so their callbacks never touch
+		// this session's ctx after it is replaced (newSession/fork/switch/reload)
+		// or pi exits.
+		cancelPendingWidgetClears();
 	});
 
 	function workspaceStatusLines(ctx: ExtensionContext, advanced = false): string[] {
@@ -5561,7 +5598,7 @@ export default function (pi: ExtensionAPI) {
 		const result = await searchPackMemory(activePackPath, text, 2, "keyword");
 		if (result.matchCount > 0 && !isNoResultText(result.text) && ctx.hasUI) {
 			ctx.ui.setWidget("memctx-tool-failure", ["\x1b[33m💡 memctx: Found memory that may help with the failed tool call.\x1b[0m", truncate(result.text.replace(/\n+/g, " "), 300)]);
-			setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-tool-failure", []), 20000);
+			scheduleWidgetClear(ctx, "memctx-tool-failure", 20000);
 		}
 	});
 
@@ -5649,14 +5686,14 @@ export default function (pi: ExtensionAPI) {
 					const visibleSavedItems = uniqueSavedMemoryItems(savedItems);
 					const lines = runWithPackSnapshot(() => visibleSavedItems.map((item) => `   - ${item.type}: ${memoryWikilink(item.rel, item.title)} (${item.action})`));
 					ctx.ui.setWidget("memctx-learned", [`\x1b[32m🧠 memctx learned ${visibleSavedItems.length} memor${visibleSavedItems.length === 1 ? "y" : "ies"}\x1b[0m`, ...lines]);
-					setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-learned", []), 30000);
+					scheduleWidgetClear(ctx, "memctx-learned", 30000);
 				}
 				if (queuedCount > 0 && ctx.hasUI) {
 					ctx.ui.setWidget("memctx-learn", [
 						`\x1b[33m💡 memctx: ${queuedCount} memory candidate${queuedCount === 1 ? "" : "s"} queued for review.\x1b[0m`,
 						"   Run /memctx-review to review, save, or discard queued candidates.",
 					]);
-					setTimeout(() => ctx.hasUI && ctx.ui.setWidget("memctx-learn", []), 30000);
+					scheduleWidgetClear(ctx, "memctx-learn", 30000);
 				}
 			} catch (err) {
 				llmStats.curateErrors = (llmStats.curateErrors ?? 0) + 1;
